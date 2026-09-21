@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicI64;
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
 use chrono::DateTime;
@@ -22,6 +23,7 @@ use pretty_assertions::assert_eq;
 
 struct Host {
     clock: AtomicI64,
+    agent_path_calls: AtomicUsize,
     members: HashMap<ThreadId, AgentPath>,
     active: AtomicBool,
     fail_notifications: AtomicBool,
@@ -31,6 +33,7 @@ struct Host {
 impl MessageBoardHost for Host {
     fn agent_path(&self, caller: ThreadId) -> BoxFuture<'_, Result<AgentPath>> {
         Box::pin(async move {
+            self.agent_path_calls.fetch_add(1, Ordering::SeqCst);
             self.members
                 .get(&caller)
                 .cloned()
@@ -59,7 +62,7 @@ impl MessageBoardHost for Host {
     fn notify(
         &self,
         recipient: ThreadId,
-        post: PostMetadata,
+        post: PostPreview,
     ) -> BoxFuture<'_, Result<NotificationDelivery>> {
         Box::pin(async move {
             if self.fail_notifications.load(Ordering::SeqCst) {
@@ -73,7 +76,7 @@ impl MessageBoardHost for Host {
             self.notifications
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push((recipient, post));
+                .push((recipient, post.metadata));
             Ok(NotificationDelivery::Accepted)
         })
     }
@@ -88,6 +91,7 @@ async fn shared_handles_resume_posts_and_preserve_subscription_rules() {
     let child_path = AgentPath::root().join("worker").unwrap();
     let host = Arc::new(Host {
         clock: AtomicI64::default(),
+        agent_path_calls: AtomicUsize::default(),
         members: [(root, AgentPath::root()), (child, child_path.clone())].into(),
         fail_notifications: AtomicBool::new(false),
         active: AtomicBool::new(true),
@@ -165,6 +169,23 @@ async fn shared_handles_resume_posts_and_preserve_subscription_rules() {
         )
         .await
         .unwrap();
+    // Posting still succeeds when the subscriber lookup returns an empty array.
+    resumed
+        .post(
+            root,
+            PostRequest {
+                request_id: "no-subscribers".into(),
+                destination: PostDestination::Channel("proofs".into()),
+                text: "saved without notifications".into(),
+                agents_to_notify: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        *host.notifications.lock().unwrap(),
+        vec![(child, metadata.clone())]
+    );
     resumed
         .set_subscription(
             root,
@@ -223,6 +244,7 @@ async fn failed_requests_do_not_create_channels_or_notify_inactive_agents() {
     let root = ThreadId::new();
     let host = Arc::new(Host {
         clock: AtomicI64::default(),
+        agent_path_calls: AtomicUsize::default(),
         members: [(root, AgentPath::root())].into(),
         fail_notifications: AtomicBool::new(false),
         active: AtomicBool::new(false),
@@ -288,6 +310,7 @@ async fn queries_enforce_page_and_preview_caps() {
     let host = Arc::new(Host {
         fail_notifications: AtomicBool::new(false),
         clock: AtomicI64::default(),
+        agent_path_calls: AtomicUsize::default(),
         members: [(root, AgentPath::root())].into(),
         active: AtomicBool::new(false),
         notifications: Mutex::default(),
@@ -378,6 +401,7 @@ async fn queries_page_discussions_and_search_unicode() {
     let host = Arc::new(Host {
         fail_notifications: AtomicBool::new(false),
         clock: AtomicI64::default(),
+        agent_path_calls: AtomicUsize::default(),
         members: [(root, AgentPath::root())].into(),
         active: AtomicBool::new(true),
         notifications: Mutex::default(),
@@ -419,11 +443,19 @@ async fn queries_page_discussions_and_search_unicode() {
     };
     let page = board.list_threads(root, query.clone()).await.unwrap();
     assert_eq!(
-        page.results
-            .iter()
-            .map(|thread| thread.thread_id)
-            .collect::<Vec<_>>(),
-        vec![first.message_id]
+        page.results,
+        vec![ThreadSummary {
+            thread_id: first.message_id,
+            root_post: PostPreview {
+                metadata: first.clone(),
+                text_preview: "É".into(),
+                n_chars: 6,
+                truncated: true,
+            },
+            reply_count: 0,
+            last_activity_at: first.created_at,
+            latest_reply: None,
+        }]
     );
     let next = board
         .list_threads(
@@ -439,11 +471,19 @@ async fn queries_page_discussions_and_search_unicode() {
         .await
         .unwrap();
     assert_eq!(
-        next.results
-            .iter()
-            .map(|thread| thread.thread_id)
-            .collect::<Vec<_>>(),
-        vec![second.message_id]
+        next.results,
+        vec![ThreadSummary {
+            thread_id: second.message_id,
+            root_post: PostPreview {
+                metadata: second.clone(),
+                text_preview: "s".into(),
+                n_chars: 6,
+                truncated: true,
+            },
+            reply_count: 0,
+            last_activity_at: second.created_at,
+            latest_reply: None,
+        }]
     );
     assert_eq!(next.next_cursor, None);
     let reply = board
@@ -622,6 +662,7 @@ async fn tools_cover_channel_discussions_subscriptions_and_escaped_previews() {
         fail_notifications: AtomicBool::new(false),
         members: [(root, AgentPath::root()), (child, child_path.clone())].into(),
         clock: AtomicI64::default(),
+        agent_path_calls: AtomicUsize::default(),
         active: AtomicBool::new(true),
         notifications: Mutex::default(),
     });
@@ -630,7 +671,13 @@ async fn tools_cover_channel_discussions_subscriptions_and_escaped_previews() {
             .await
             .unwrap(),
     );
-    let tools = message_board_tools(board, root, AgentPath::root());
+    let tools = message_board_tools(
+        board,
+        root,
+        AgentPath::root(),
+        Some("collaboration"),
+        "Shared tools",
+    );
     let tool = |name: &str| {
         tools
             .iter()
@@ -813,6 +860,7 @@ async fn tools_validate_arguments_deduplicate_calls_and_bound_unicode_results() 
         fail_notifications: AtomicBool::new(false),
         members: [(root, AgentPath::root()), (child, child_path)].into(),
         clock: AtomicI64::default(),
+        agent_path_calls: AtomicUsize::default(),
         active: AtomicBool::new(true),
         notifications: Mutex::default(),
     });
@@ -821,7 +869,13 @@ async fn tools_validate_arguments_deduplicate_calls_and_bound_unicode_results() 
             .await
             .unwrap(),
     );
-    let tools = message_board_tools(board.clone(), root, AgentPath::root());
+    let tools = message_board_tools(
+        board.clone(),
+        root,
+        AgentPath::root(),
+        Some("collaboration"),
+        "Shared tools",
+    );
     let call = board_tool_call;
     let tool = |name: &str| {
         tools
@@ -905,6 +959,43 @@ async fn tools_validate_arguments_deduplicate_calls_and_bound_unicode_results() 
             next_cursor: None,
         }
     );
+    // An impossible metadata budget stops when both the page and preview reach one.
+    // Unequal limits ensure we keep shrinking while either dimension can still change.
+    for (name, args, expected_reads) in [
+        ("get_channels", json!({"limit":1}), 1),
+        (
+            "list_threads",
+            json!({"channel_name":"work","limit":1,"max_chars_per_post":8}),
+            4,
+        ),
+        ("search_posts", json!({"limit":8,"max_chars_per_post":1}), 4),
+        (
+            "read_thread",
+            json!({"thread_id":metadata.thread_id,"limit":3,"max_chars_per_post":1}),
+            2,
+        ),
+        (
+            "read_post",
+            json!({"message_id":metadata.message_id,"limit_chars":3}),
+            2,
+        ),
+    ] {
+        let mut limited = call(name, args);
+        limited.truncation_policy = TruncationPolicy::Bytes(1);
+        host.agent_path_calls.store(0, Ordering::SeqCst);
+        let error = tool(name).handle(limited).await.err().unwrap();
+        assert_eq!(
+            error,
+            codex_tools::FunctionCallError::RespondToModel(
+                "The output budget is too small for this result's metadata.".into()
+            ),
+        );
+        assert_eq!(
+            host.agent_path_calls.load(Ordering::SeqCst),
+            expected_reads,
+            "{name}",
+        );
+    }
     let read_call = call("read_post", json!({"message_id":metadata.message_id}));
     let result = tool("read_post").handle(read_call.clone()).await.unwrap();
     assert!(result.contains_external_context());

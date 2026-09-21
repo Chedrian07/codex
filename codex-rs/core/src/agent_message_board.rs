@@ -8,13 +8,14 @@ use crate::ThreadManager;
 use crate::config::Config;
 use crate::context::AgentMessageBoardNotification;
 use crate::context::ContextualUserFragment;
+use crate::tools::MULTI_AGENT_V2_NAMESPACE_DESCRIPTION;
 use chrono::DateTime;
 use chrono::Utc;
 use codex_agent_message_board_extension::AgentMessageBoard;
 use codex_agent_message_board_extension::LocalAgentMessageBoard;
 use codex_agent_message_board_extension::MessageBoardHost;
 use codex_agent_message_board_extension::NotificationDelivery;
-use codex_agent_message_board_extension::PostMetadata;
+use codex_agent_message_board_extension::PostPreview;
 use codex_extension_api::ExtensionRegistryBuilder;
 use codex_features::Feature;
 use codex_protocol::AgentPath;
@@ -23,6 +24,7 @@ use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result;
+use codex_protocol::protocol::InterAgentCommunication;
 use futures::future::BoxFuture;
 use std::sync::Arc;
 use std::sync::Weak;
@@ -33,25 +35,30 @@ pub fn install_agent_message_board(
     registry: &mut ExtensionRegistryBuilder<Config>,
     manager: Weak<ThreadManager>,
 ) {
-    codex_agent_message_board_extension::install(registry, move |config: &Config, tree, caller| {
-        // MAv2 supplies tree paths; ephemeral runtimes must not open durable storage.
-        if !config.features.enabled(Feature::AgentMessageBoard)
-            || !config.features.enabled(Feature::MultiAgentV2)
-            || config.ephemeral
-        {
-            return Box::pin(async { Ok(None) });
-        }
-        let sqlite = config.sqlite_config().clone();
-        let host = Arc::new(LocalBoardHost {
-            manager: manager.clone(),
-            tree,
-            caller,
-        });
-        Box::pin(async move {
-            let board = LocalAgentMessageBoard::open(&sqlite, tree, host).await?;
-            Ok(Some(Arc::new(board) as Arc<dyn AgentMessageBoard>))
-        })
-    });
+    codex_agent_message_board_extension::install(
+        registry,
+        MULTI_AGENT_V2_NAMESPACE_DESCRIPTION,
+        |config: &Config| config.multi_agent_v2.tool_namespace.clone(),
+        move |config: &Config, tree, caller| {
+            // MAv2 supplies tree paths; ephemeral runtimes must not open durable storage.
+            if !config.features.enabled(Feature::AgentMessageBoard)
+                || !config.features.enabled(Feature::MultiAgentV2)
+                || config.ephemeral
+            {
+                return Box::pin(async { Ok(None) });
+            }
+            let sqlite = config.sqlite_config().clone();
+            let host = Arc::new(LocalBoardHost {
+                manager: manager.clone(),
+                tree,
+                caller,
+            });
+            Box::pin(async move {
+                let board = LocalAgentMessageBoard::open(&sqlite, tree, host).await?;
+                Ok(Some(Arc::new(board) as Arc<dyn AgentMessageBoard>))
+            })
+        },
+    );
 }
 
 struct LocalBoardHost {
@@ -135,14 +142,14 @@ impl MessageBoardHost for LocalBoardHost {
 
     fn notify(
         &self,
-        recipient: ThreadId,
-        post: PostMetadata,
+        recipient_id: ThreadId,
+        post: PostPreview,
     ) -> BoxFuture<'_, Result<NotificationDelivery>> {
         Box::pin(async move {
             let Some(manager) = self.manager.upgrade() else {
                 return Ok(NotificationDelivery::SkippedInactive);
             };
-            let recipient = match manager.get_thread(recipient).await {
+            let recipient = match manager.get_thread(recipient_id).await {
                 Ok(thread) => thread,
                 Err(error) if matches!(error.details(), CodexErrorDetails::ThreadNotFound(_)) => {
                     return Ok(NotificationDelivery::SkippedInactive);
@@ -154,13 +161,24 @@ impl MessageBoardHost for LocalBoardHost {
                     "notification recipient belongs to another board".into(),
                 ));
             }
-            let notice = AgentMessageBoardNotification {
-                message_id: post.message_id,
-                thread_id: post.thread_id,
-            };
+            let recipient_path = recipient
+                .session
+                .services
+                .agent_control
+                .ensure_agent_known(recipient_id)?
+                .agent_path
+                .ok_or_else(|| CodexErr::InvalidRequest("agent has no tree path".into()))?;
+            let notice = AgentMessageBoardNotification(post);
+            let communication = InterAgentCommunication::new(
+                notice.0.metadata.author.clone(),
+                recipient_path,
+                Vec::new(),
+                notice.render(),
+                /*trigger_turn*/ false,
+            );
             Ok(
                 match recipient
-                    .inject_if_running(vec![ContextualUserFragment::into(notice)])
+                    .inject_if_running(vec![communication.to_model_input_item()])
                     .await
                 {
                     Ok(()) => NotificationDelivery::Accepted,
