@@ -4,9 +4,10 @@ name: sync-fork
 # Not part of upstream; safe to drop when rebasing onto upstream history.
 on:
   schedule:
-    # Every 6 hours (UTC). GitHub does not guarantee on-time delivery for cron
-    # triggers; runs are routinely delayed by tens of minutes under load.
-    - cron: "0 */6 * * *"
+    # Every 2 hours (UTC). Minute 17 rather than 0 to sidestep the top-of-hour
+    # congestion; GitHub does not guarantee on-time delivery for cron triggers
+    # and runs are routinely delayed by tens of minutes under load.
+    - cron: "17 */2 * * *"
   workflow_dispatch:
 
 permissions:
