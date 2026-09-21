@@ -1,0 +1,60 @@
+name: sync-fork
+
+# Fork-only: keeps Chedrian07/codex up to date with openai/codex.
+# Not part of upstream; safe to drop when rebasing onto upstream history.
+on:
+  schedule:
+    # Every 6 hours (UTC). GitHub does not guarantee on-time delivery for cron
+    # triggers; runs are routinely delayed by tens of minutes under load.
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-fork
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    # Guard so this never runs in upstream or in forks-of-this-fork.
+    if: github.repository == 'Chedrian07/codex'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout fork main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          # A PAT is required, not GITHUB_TOKEN: upstream touches files under
+          # .github/workflows/ constantly, and GitHub refuses pushes from an
+          # App token that create or update workflow files.
+          token: ${{ secrets.FORK_SYNC_PAT }}
+
+      - name: Merge upstream/main
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git remote add upstream https://github.com/openai/codex.git
+          # Deliberately --no-tags: upstream rust-v*/python-v*/rusty-v8-v* tags
+          # would trigger the release workflows inside this fork.
+          git fetch --no-tags upstream main:refs/remotes/upstream/main
+
+          if git merge-base --is-ancestor refs/remotes/upstream/main HEAD; then
+            echo "Already contains upstream/main ($(git rev-parse --short refs/remotes/upstream/main)); nothing to do."
+            exit 0
+          fi
+
+          if ! git merge --no-edit refs/remotes/upstream/main; then
+            git merge --abort || true
+            echo "::error::Merge conflict with upstream/main. Resolve it locally and push."
+            exit 1
+          fi
+
+          git push origin main
+          echo "Synced to upstream $(git rev-parse --short refs/remotes/upstream/main)."
