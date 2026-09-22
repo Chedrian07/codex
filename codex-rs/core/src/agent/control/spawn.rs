@@ -70,7 +70,7 @@ pub(super) fn agent_nickname_candidates(config: &Config, role_name: Option<&str>
         .collect()
 }
 
-fn keep_forked_rollout_item(item: &RolloutItem, preserve_reference_context_item: bool) -> bool {
+fn keep_forked_rollout_item(item: &RolloutItem, preserve_context_baselines: bool) -> bool {
     match item {
         RolloutItem::ResponseItem(envelope) => match &envelope.item {
             ResponseItem::Message { role, phase, .. } => match role.as_str() {
@@ -107,7 +107,7 @@ fn keep_forked_rollout_item(item: &RolloutItem, preserve_reference_context_item:
         // Full-history forks preserve the cached prompt prefix and can keep diffing
         // from the parent's durable baseline. Truncated forks drop part of that prompt,
         // so they must rebuild context on their first child turn.
-        RolloutItem::TurnContext(_) | RolloutItem::WorldState(_) => preserve_reference_context_item,
+        RolloutItem::TurnContext(_) | RolloutItem::WorldState(_) => preserve_context_baselines,
         // Child threads inherit model context, not the parent's cumulative usage state.
         RolloutItem::TokenUsageRecord(_) => false,
         RolloutItem::Compacted(_) | RolloutItem::EventMsg(_) | RolloutItem::SessionMeta(_) => true,
@@ -185,7 +185,7 @@ impl LocalAgentControl {
         config: &Config,
         root_thread_id: ThreadId,
     ) {
-        self.state.register_root_thread(root_thread_id);
+        self.runtime.registry.register_root_thread(root_thread_id);
 
         let Ok(state) = self.upgrade() else {
             return;
@@ -208,7 +208,12 @@ impl LocalAgentControl {
         };
 
         for thread_id in descendant_ids {
-            if self.state.agent_metadata_for_thread(thread_id).is_some() {
+            if self
+                .runtime
+                .registry
+                .agent_metadata_for_thread(thread_id)
+                .is_some()
+            {
                 continue;
             }
             let restore_result = async {
@@ -227,7 +232,10 @@ impl LocalAgentControl {
                     .map_err(|err| {
                         CodexErr::InvalidRequest(format!("invalid stored agent path: {err}"))
                     })?;
-                let mut reservation = self.state.reserve_spawn_slot(/*max_threads*/ None)?;
+                let mut reservation = self
+                    .runtime
+                    .registry
+                    .reserve_spawn_slot(/*max_threads*/ None)?;
                 let mut metadata = self.prepare_agent_metadata(
                     &mut reservation,
                     config,
@@ -276,7 +284,10 @@ impl LocalAgentControl {
         if thread.is_running()
             && thread.multi_agent_version() == Some(MultiAgentVersion::V2)
             && thread.session_source.parent_thread_id() == Some(parent_thread_id)
-            && Arc::ptr_eq(&self.state, &thread.session.services.agent_control.state)
+            && Arc::ptr_eq(
+                &self.runtime.registry,
+                &thread.session.services.local_agent_runtime.registry,
+            )
         {
             return Ok(());
         }
@@ -303,7 +314,10 @@ impl LocalAgentControl {
                 .is_some_and(|registered| Arc::ptr_eq(registered, parent))
                 || !parent.is_running()
                 || parent.multi_agent_version() != Some(MultiAgentVersion::V2)
-                || !Arc::ptr_eq(&self.state, &parent.session.services.agent_control.state)
+                || !Arc::ptr_eq(
+                    &self.runtime.registry,
+                    &parent.session.services.local_agent_runtime.registry,
+                )
             {
                 return Err(CodexErr::InvalidRequest(format!(
                     "cannot resume multi-agent v2 child {thread_id}: parent ownership is unavailable; resume the parent first"
@@ -314,10 +328,15 @@ impl LocalAgentControl {
             self.touch_loaded_v2_residency(&state, thread_id).await;
             return Ok(());
         }
-        if self.state.agent_metadata_for_thread(thread_id).is_none() {
+        if self
+            .runtime
+            .registry
+            .agent_metadata_for_thread(thread_id)
+            .is_none()
+        {
             return Err(CodexErr::ThreadNotFound(thread_id));
         }
-        let mut environment_selections = self.state.evicted_environments(thread_id);
+        let mut environment_selections = self.runtime.registry.evicted_environments(thread_id);
 
         let stored_thread = state
             .read_stored_thread(ReadThreadParams {
@@ -544,7 +563,8 @@ impl LocalAgentControl {
         {
             Some(parent.session.inherited_instructions().await)
         } else {
-            self.shared_thread_instructions_provider
+            self.runtime
+                .shared_thread_instructions_provider
                 .get()
                 .map(|provider| SessionInstructions {
                     thread_provider: Some(Arc::clone(provider)),
@@ -576,7 +596,7 @@ impl LocalAgentControl {
                 if let Some(parent_thread_id) = owner_thread_id {
                     self.validate_loaded_v2_child(&reloaded_thread.thread, parent_thread_id)?;
                 }
-                self.state.clear_evicted_environments(thread_id);
+                self.runtime.registry.clear_evicted_environments(thread_id);
                 residency_slot.commit(reloaded_thread.thread_id);
                 state.notify_thread_created(reloaded_thread.thread_id);
                 Ok(())
@@ -586,7 +606,7 @@ impl LocalAgentControl {
                     if let Some(parent_thread_id) = owner_thread_id {
                         self.validate_loaded_v2_child(&thread, parent_thread_id)?;
                     }
-                    self.state.clear_evicted_environments(thread_id);
+                    self.runtime.registry.clear_evicted_environments(thread_id);
                     drop(residency_slot);
                     self.touch_loaded_v2_residency(&state, thread_id).await;
                     return Ok(());
@@ -634,7 +654,10 @@ impl LocalAgentControl {
         } else {
             agent_max_threads
         };
-        let mut reservation = self.state.reserve_spawn_slot(reservation_max_threads)?;
+        let mut reservation = self
+            .runtime
+            .registry
+            .reserve_spawn_slot(reservation_max_threads)?;
         let inheritance = SpawnAgentThreadInheritance {
             environments: self
                 .inherited_environments_for_source(&state, session_source.as_ref())
@@ -913,9 +936,8 @@ impl LocalAgentControl {
             } else {
                 Vec::new()
             };
-        let mut preserve_reference_context_item =
-            matches!(fork_mode, SpawnAgentForkMode::FullHistory);
-        if preserve_reference_context_item {
+        let mut preserve_context_baselines = matches!(fork_mode, SpawnAgentForkMode::FullHistory);
+        if preserve_context_baselines {
             for item in forked_rollout_items.iter().rev() {
                 let RolloutItem::Compacted(compacted) = item else {
                     continue;
@@ -923,7 +945,7 @@ impl LocalAgentControl {
                 // Legacy checkpoints force the child to rebuild context regardless of the
                 // live parent's reference baseline; an older superseded checkpoint does not.
                 if compacted.replacement_history.is_none() {
-                    preserve_reference_context_item = false;
+                    preserve_context_baselines = false;
                 }
                 break;
             }
@@ -978,7 +1000,7 @@ impl LocalAgentControl {
                         // If the child will rebuild its initial context, drop the inherited
                         // instructions; startup will add the current requirements and effort
                         // instructions once.
-                        return preserve_reference_context_item;
+                        return preserve_context_baselines;
                     }
                     let (
                         Some(parent_developer_instructions),
@@ -996,7 +1018,7 @@ impl LocalAgentControl {
                     }
 
                     *replaced = true;
-                    let replacement = if preserve_reference_context_item {
+                    let replacement = if preserve_context_baselines {
                         subagent_developer_instructions.as_str()
                     } else {
                         ""
@@ -1011,7 +1033,7 @@ impl LocalAgentControl {
             true
         };
         forked_rollout_items.retain_mut(|item| {
-            if !keep_forked_rollout_item(item, preserve_reference_context_item)
+            if !keep_forked_rollout_item(item, preserve_context_baselines)
                 || destination_history_mode == Some(ThreadHistoryMode::Paginated)
                     && matches!(
                         &*item,
@@ -1031,8 +1053,15 @@ impl LocalAgentControl {
                     retain_forked_item(response_item, &mut replaced_parent_developer_instructions)
                 }
                 RolloutItem::Compacted(compacted) => {
-                    // This checkpoint belongs to the inherited parent prefix.
+                    // This compaction becomes part of the subagent's initial history. Rewrite its
+                    // metadata to describe the child rather than the parent.
                     compacted.latest_token_usage_record = None;
+                    if let Some(resume_metadata) = &mut compacted.resume_metadata {
+                        resume_metadata.multi_agent_version = Some(multi_agent_version);
+                        if !preserve_context_baselines {
+                            resume_metadata.previous_turn_settings = None;
+                        }
+                    }
                     // Parent-local review evidence must not become the child's authorization.
                     // Root user authorization is collected separately by the host.
                     compacted.guardian_history = None;
@@ -1074,7 +1103,7 @@ impl LocalAgentControl {
         // context omitted the parent's developer fragment, append the child's override so its
         // instructions still reach the model exactly once.
         if let Some(subagent_developer_instructions) = subagent_developer_instructions.as_ref()
-            && preserve_reference_context_item
+            && preserve_context_baselines
             && !replaced_parent_developer_instructions
             && !subagent_developer_instructions.is_empty()
             && parent_thread
@@ -1088,7 +1117,7 @@ impl LocalAgentControl {
             ));
             forked_rollout_items.push(RolloutItem::ResponseItem(developer_message.into()));
         }
-        if preserve_reference_context_item
+        if preserve_context_baselines
             && multi_agent_version == MultiAgentVersion::V2
             && let Some(subagent_usage_hint) = options
                 .multi_agent_v2_usage_hints
@@ -1246,7 +1275,10 @@ impl LocalAgentControl {
             )
             .await;
         let agent_max_threads = config.effective_agent_max_threads(multi_agent_version);
-        let mut reservation = self.state.reserve_spawn_slot(agent_max_threads)?;
+        let mut reservation = self
+            .runtime
+            .registry
+            .reserve_spawn_slot(agent_max_threads)?;
         let (session_source, agent_metadata) = match session_source {
             SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                 parent_thread_id,
