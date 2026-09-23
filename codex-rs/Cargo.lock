@@ -3021,6 +3021,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-core-plugin-common"
+version = "0.0.0"
+dependencies = [
+ "codex-utils-absolute-path",
+ "semver",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "codex-core-plugins"
 version = "0.0.0"
 dependencies = [
@@ -3030,6 +3041,7 @@ dependencies = [
  "codex-app-server-protocol",
  "codex-config",
  "codex-connectors",
+ "codex-core-plugin-common",
  "codex-exec-server",
  "codex-exec-server-test-support",
  "codex-git-utils",
@@ -3055,7 +3067,6 @@ dependencies = [
  "libc",
  "pretty_assertions",
  "regex",
- "semver",
  "serde",
  "serde_json",
  "serde_with",
@@ -3148,21 +3159,25 @@ dependencies = [
  "codex-api",
  "codex-build-info",
  "codex-config",
+ "codex-core-plugin-common",
  "codex-exec-server-protocol",
  "codex-exec-server-test-support",
  "codex-file-system",
+ "codex-file-watcher",
  "codex-http-client",
  "codex-network-proxy",
  "codex-otel",
  "codex-protocol",
  "codex-sandboxing",
  "codex-shell-command",
+ "codex-skills",
  "codex-test-binary-support",
  "codex-utils-absolute-path",
  "codex-utils-cargo-bin",
  "codex-utils-home-dir",
  "codex-utils-path-uri",
  "codex-utils-pty",
+ "codex-utils-redacted-string",
  "codex-utils-rustls-provider",
  "codex-websocket-auth",
  "codex-websocket-client",
@@ -3259,6 +3274,7 @@ dependencies = [
 name = "codex-extension-api"
 version = "0.0.0"
 dependencies = [
+ "codex-api",
  "codex-config",
  "codex-context-fragments",
  "codex-exec-server-protocol",
@@ -3269,6 +3285,7 @@ dependencies = [
  "codex-tools",
  "codex-utils-absolute-path",
  "codex-utils-path-uri",
+ "futures",
  "pretty_assertions",
  "serde_json",
  "tokio",
@@ -3612,6 +3629,7 @@ dependencies = [
  "futures",
  "http 1.4.0",
  "http-body 1.0.1",
+ "httpdate",
  "native-tls",
  "opentelemetry",
  "opentelemetry_sdk",
@@ -4105,6 +4123,7 @@ dependencies = [
  "codex-http-client",
  "codex-protocol",
  "codex-utils-absolute-path",
+ "codex-utils-stream-parser",
  "codex-utils-string",
  "eventsource-stream",
  "gethostname",
@@ -4147,6 +4166,7 @@ name = "codex-plugin"
 version = "0.0.0"
 dependencies = [
  "codex-config",
+ "codex-core-plugin-common",
  "codex-protocol",
  "codex-utils-absolute-path",
  "codex-utils-path-uri",

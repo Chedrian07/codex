@@ -38,6 +38,7 @@ pub enum ProcessMode {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum DescriptorPolicy {
     Inherit,
+    /// Exclude unrelated descriptors, allowing launch if best-effort cleanup fails.
     Explicit,
 }
 
@@ -80,6 +81,10 @@ pub struct Command {
     #[cfg(target_os = "linux")]
     parent_pid: Option<libc::pid_t>,
     #[cfg(unix)]
+    pub(crate) stdout_file: Option<std::os::fd::OwnedFd>,
+    #[cfg(unix)]
+    pub(crate) stderr_file: Option<std::os::fd::OwnedFd>,
+    #[cfg(unix)]
     pub(crate) arg0: Option<OsString>,
 }
 
@@ -106,6 +111,10 @@ impl Command {
             inherited_fds: Vec::new(),
             #[cfg(target_os = "linux")]
             parent_pid: None,
+            #[cfg(unix)]
+            stdout_file: None,
+            #[cfg(unix)]
+            stderr_file: None,
             #[cfg(unix)]
             arg0: None,
         }
@@ -278,9 +287,10 @@ impl Command {
             #[cfg(not(target_os = "linux"))]
             let parent_pid: Option<i32> = None;
             if new_session || explicit_fds || !targets.is_empty() || parent_pid.is_some() {
-                // SAFETY: Keep the existing Unix pre-exec setup in the fallback
-                // backend. The caller keeps the selected descriptors open, and
-                // this callback only changes the child's descriptor table.
+                // SAFETY: The caller keeps the selected descriptors open. Session
+                // and parent-death setup use system calls; Linux and macOS cleanup
+                // avoid allocation after fork. Other Unix targets have an
+                // allocation-after-fork risk documented on close_inherited_fds_except.
                 unsafe {
                     self.inner.pre_exec(move || {
                         if new_session {
@@ -295,6 +305,15 @@ impl Command {
                         Ok(())
                     });
                 }
+            }
+        }
+        #[cfg(unix)]
+        {
+            if let Some(fd) = self.stdout_file {
+                self.inner.stdout(TokioStdio::from(fd));
+            }
+            if let Some(fd) = self.stderr_file {
+                self.inner.stderr(TokioStdio::from(fd));
             }
         }
         #[cfg(unix)]

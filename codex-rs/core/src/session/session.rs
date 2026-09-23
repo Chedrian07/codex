@@ -10,7 +10,6 @@ use crate::agent::api::AgentControl;
 use crate::agents_md_manager::AgentsMdManager;
 use crate::agents_md_manager::SessionInstructions;
 use crate::config::ConstraintError;
-use crate::context::GuardianContextMode;
 use crate::environment_selection::ThreadEnvironments;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::hook_mcp_executor::CoreHookMcpExecutor;
@@ -71,7 +70,6 @@ pub(crate) struct Session {
     /// The set of enabled features should be invariant for the lifetime of the
     /// session.
     pub(super) features: ManagedFeatures,
-    pub(crate) guardian_context_mode: GuardianContextMode,
     pub(super) isolation: codex_extension_api::SessionIsolation,
     pub(crate) tool_policy: Arc<codex_extension_api::ToolPolicy>,
     pub(crate) windows_sandbox_proxy_settings_mode:
@@ -709,7 +707,7 @@ impl Session {
         )
     }
 
-    fn with_window_and_fork_metadata(
+    pub(crate) fn with_window_and_fork_metadata(
         &self,
         turn_context: &TurnContext,
         responses_metadata: CodexResponsesMetadata,
@@ -988,8 +986,6 @@ impl Session {
             thread_id.to_string(),
             thread_extension_init,
         );
-        // Capture follows the flag; replay selects reviewer policy from the saved checkpoint.
-        let guardian_context_mode = GuardianContextMode::from_features(&config.features);
         thread_extension_data.insert(crate::context::GuardianReviewEvidence::default());
         // Kick off independent async setup tasks in parallel to reduce startup latency.
         //
@@ -1485,8 +1481,7 @@ impl Session {
             let mut state = SessionState::new_with_auto_compact_window_ids(
                 session_configuration.clone(),
                 initial_auto_compact_window_ids,
-                ContextManager::with_guardian_context_mode(
-                    guardian_context_mode,
+                ContextManager::for_session(
                     &session_configuration.session_source,
                 ),
             );
@@ -1689,7 +1684,7 @@ impl Session {
                 agents_md_manager,
                 plugins_manager: Arc::clone(&plugins_manager),
                 mcp_manager: Arc::clone(&mcp_manager),
-                extensions,
+                extensions: Arc::clone(&extensions),
                 // TODO(jif): extract session to share between sub-agents
                 session_extension_data,
                 thread_extension_data,
@@ -1731,6 +1726,7 @@ impl Session {
                     attestation_provider,
                     config.http_client_factory(),
                     workspace_routing.as_ref().clone(),
+                    extensions.model_request_contributors().to_vec(),
                 )
                 .with_restored_history(matches!(
                     &initial_history,
@@ -1765,7 +1761,6 @@ impl Session {
                 thread_settings_persistence: Semaphore::new(/*permits*/ 1),
                 managed_network_proxy_refresh_lock: Semaphore::new(/*permits*/ 1),
                 features: config.features.clone(),
-                guardian_context_mode,
                 isolation,
                 tool_policy,
                 windows_sandbox_proxy_settings_mode,
