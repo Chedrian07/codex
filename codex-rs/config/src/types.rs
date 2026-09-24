@@ -13,6 +13,7 @@ pub use crate::mcp_types::McpServerEnvVar;
 pub use crate::mcp_types::McpServerOAuthConfig;
 pub use crate::mcp_types::McpServerToolConfig;
 pub use crate::mcp_types::McpServerTransportConfig;
+pub use crate::mcp_types::McpStartupReadiness;
 pub use crate::mcp_types::RawMcpServerConfig;
 pub use crate::shell_environment_policy::ShellEnvironmentPolicyToml;
 pub use codex_protocol::config_types::AltScreenMode;
@@ -820,6 +821,10 @@ pub struct Tui {
     /// Defaults to `true`. Disabling this leaves `/recap` available on demand.
     #[serde(default = "default_true")]
     pub auto_recap: bool,
+
+    /// Suggest a next message after successful turns. Defaults to `false`.
+    #[serde(default)]
+    pub prompt_suggestions: bool,
 
     /// When true, disables burst-paste detection for typed input entirely.
     /// All characters are inserted as they are received, and no buffering

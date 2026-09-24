@@ -48,6 +48,8 @@ impl App {
                     | AppEvent::CommitRealtimeTranscriptHistory
                     | AppEvent::ResetTranscriptForThreadSwitch
                     | AppEvent::FinishPromptRevert { .. }
+                    | AppEvent::PromptSuggestionStarted { .. }
+                    | AppEvent::PromptSuggestionFinished { .. }
                     | AppEvent::ManagedWorktreeCreated(_)
                     | AppEvent::AgentsOverviewWorktreeCreated(_)
                     | AppEvent::AppendMessageHistoryEntry { .. }
@@ -345,7 +347,7 @@ impl App {
             }
             AppEvent::OpenWarnings => self.chat_widget.open_warnings(&self.transcript_cells),
             AppEvent::CopyWarning(text) => {
-                let result = tui.copy_transcript_selection(&text);
+                let result = tui.copy_transcript_selection(&text, crate::clipboard_copy::CopyFormat::PlainText);
                 self.chat_widget.show_selection_copy_result(result);
             }
             AppEvent::OpenTranscriptExportFilePrompt => {
@@ -2632,6 +2634,19 @@ impl App {
             } => {
                 self.suggest_thread_name(app_server, thread_id, request_id)
                     .await;
+            }
+            AppEvent::GeneratePromptSuggestion(request) => {
+                self.generate_prompt_suggestion(app_server, request);
+            }
+            AppEvent::PromptSuggestionStarted { request, result } => {
+                self.on_prompt_suggestion_started(app_server, request, result);
+            }
+            AppEvent::PromptSuggestionFinished { request, temporary_thread_id, text } => {
+                self.temporary_structured_requests.remove(&temporary_thread_id);
+                if text.is_none() {
+                    request.cancellation.cancel();
+                }
+                self.chat_widget.apply_prompt_suggestion(&request, text);
             }
             AppEvent::ThreadTitleStarted {
                 cancellation,
