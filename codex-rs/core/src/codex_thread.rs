@@ -175,6 +175,8 @@ pub struct GuardianAuthorizationVersion {
 pub struct GuardianRootSnapshot {
     /// Authoritative root from which this evidence was captured.
     pub root_thread_id: ThreadId,
+    /// Distinguishes a history reset from additional authorization in the same history.
+    pub(crate) history_reset_version: u64,
     pub authorization_version: GuardianAuthorizationVersion,
     pub messages: Vec<GuardianRootMessage>,
     pub trusted_skill_paths: Vec<String>,
@@ -690,6 +692,16 @@ impl CodexThread {
         self.session
             .inject_no_new_turn(vec![item], /*current_turn_context*/ None)
             .await;
+    }
+
+    /// Records an explicit user goal mutation without scheduling a model response.
+    pub async fn record_user_goal_update(
+        &self,
+        update: crate::context::UserGoalUpdate,
+    ) -> CodexResult<()> {
+        self.session.record_user_goal_update(update).await;
+        self.checkpoint_preparation().await?;
+        Ok(())
     }
 
     /// Record raw Responses API items without starting a new turn.
