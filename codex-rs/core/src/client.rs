@@ -2112,6 +2112,18 @@ impl ModelClientSession {
         websocket_telemetry
     }
 
+    /// Whether a previous request prepared a connection that is not known to be closed.
+    /// The next request still validates provider, auth, and headers before reuse.
+    pub(crate) async fn is_websocket_prewarmed(&self) -> bool {
+        if self.websocket_session.last_request.is_some()
+            && let Some(connection) = self.websocket_session.connection.as_ref()
+        {
+            !connection.is_closed().await
+        } else {
+            false
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn prewarm_websocket(
         &mut self,
@@ -2126,7 +2138,7 @@ impl ModelClientSession {
         if !self.client.responses_websocket_enabled() {
             return Ok(());
         }
-        if self.websocket_session.last_request.is_some() {
+        if self.is_websocket_prewarmed().await {
             return Ok(());
         }
 
