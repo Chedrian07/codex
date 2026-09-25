@@ -41,6 +41,7 @@ impl App {
                 AppEvent::OpenDaemonMenu
                     | AppEvent::OpenWarnings
                     | AppEvent::CopyWarning(_)
+                    | AppEvent::UpdateWarnings { .. }
                     | AppEvent::CopySelection { .. }
                     | AppEvent::ConfirmDaemonUpdate(_)
                     | AppEvent::RunDaemonUpdate(_)
@@ -347,6 +348,20 @@ impl App {
                 }
             }
             AppEvent::OpenWarnings => self.chat_widget.open_warnings(&self.transcript_cells),
+            AppEvent::UpdateWarnings { transcript, dismissed, kept } => {
+                if !Arc::ptr_eq(&transcript, &self.chat_widget.warning_display_state.transcript) {
+                    return Ok(AppRunControl::Continue);
+                }
+                let state = &mut self.chat_widget.warning_display_state.dismissed;
+                state.extend(dismissed.into_iter().map(|entry| (entry.id, entry.details)));
+                for entry in kept {
+                    if state.get(&entry.id) == Some(&entry.details) {
+                        state.remove(&entry.id);
+                    }
+                }
+                self.chat_widget.warning_display_state.synced_cells = None;
+                tui.frame_requester().schedule_frame();
+            }
             AppEvent::CopyWarning(text) => {
                 let result = tui.copy_transcript_selection(&text, crate::clipboard_copy::CopyFormat::PlainText);
                 self.chat_widget.show_selection_copy_result(result);
