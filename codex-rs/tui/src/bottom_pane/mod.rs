@@ -445,6 +445,32 @@ impl BottomPane {
         self.request_redraw();
     }
 
+    pub(crate) fn agents_navigation_key_available(&self) -> bool {
+        let left = KeyEvent::from(KeyCode::Left);
+        self.composer.agents_navigation_key_available()
+            && !crate::keymap::keymap_action_ids()
+                .filter(|action| {
+                    matches!(
+                        action.context,
+                        KeymapContext::Global | KeymapContext::Chat | KeymapContext::Voice
+                    )
+                })
+                .any(|action| {
+                    crate::keymap::bindings_for_action(
+                        &self.keymap,
+                        action.context.config_name(),
+                        action.action,
+                    )
+                    .is_some_and(|bindings| bindings.is_pressed(left))
+                })
+            && !self.keymap.chords.bindings.iter().any(|binding| {
+                matches!(
+                    binding.action.context,
+                    KeymapContext::Global | KeymapContext::Chat | KeymapContext::Voice
+                ) && binding.chord.prefix.is_press(left)
+            })
+    }
+
     pub(crate) fn set_task_mentions_enabled(&mut self, enabled: bool) {
         self.composer.set_task_mentions_enabled(enabled);
         self.request_redraw();
@@ -1113,9 +1139,8 @@ impl BottomPane {
         self.composer.current_text()
     }
 
-    #[cfg(test)]
     pub(crate) fn composer_cursor(&self) -> usize {
-        self.composer.cursor()
+        self.composer.current_cursor()
     }
 
     #[cfg(test)]
@@ -1787,6 +1812,10 @@ impl BottomPane {
             return None;
         }
         self.composer.copy_selection(event, copy)
+    }
+
+    pub(crate) fn can_paste_on_right_click(&self) -> bool {
+        self.no_modal_or_popup_active() && self.composer.can_paste_on_right_click()
     }
 
     pub(crate) fn prepare_composer_mouse(&mut self, event: crossterm::event::MouseEvent) -> bool {

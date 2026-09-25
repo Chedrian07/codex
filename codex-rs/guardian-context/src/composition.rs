@@ -150,7 +150,9 @@ impl CollectedContext {
                         items
                             .into_iter()
                             .map(|item| Budgeted {
-                                content: ContentItem::InputText { text: item.content },
+                                content: ContentItem::InputText {
+                                    text: format!("{}\n", item.content),
+                                },
                                 retention: item.retention,
                                 source: item.source,
                             })
@@ -332,7 +334,8 @@ impl ComposedContext {
         }
         Ok((
             inputs,
-            (!metadata.guardian_sources.is_empty()).then_some(metadata),
+            (!metadata.guardian_sources.is_empty() || metadata.guardian_source_order_guidance)
+                .then_some(metadata),
         ))
     }
 
@@ -387,6 +390,9 @@ impl ComposedContext {
 impl SectionOutput {
     fn extend_delivery_metadata(&self, metadata: &mut CodexHarnessMetadata) {
         if let SectionDelivery::UserContent(items) = &self.delivery {
+            metadata.guardian_source_order_guidance |= self.id == "retained_user_instructions"
+                && items.iter().any(|item| matches!(&item.content, ContentItem::InputText { text }
+                    if text.strip_suffix('\n').is_some_and(|text| text == crate::retained_instructions::START || text == crate::retained_instructions::LEGACY_START)));
             metadata.guardian_sources.extend(
                 items
                     .iter()
@@ -404,7 +410,9 @@ fn delivered_message(
 ) -> ResponseItemEnvelope {
     ResponseItemEnvelope {
         item: user_message(content),
-        metadata: (!metadata.guardian_sources.is_empty()).then_some(metadata),
+        metadata: (!metadata.guardian_sources.is_empty()
+            || metadata.guardian_source_order_guidance)
+            .then_some(metadata),
     }
 }
 

@@ -1271,6 +1271,7 @@ fn config_toml_deserializes_model_availability_nux() {
             raw_output_mode: false,
             fullscreen_transcript: true,
             copy_on_select: Default::default(),
+            right_click_paste: Default::default(),
             alternate_screen: AltScreenMode::default(),
             status_line: None,
             status_line_use_colors: true,
@@ -4412,6 +4413,7 @@ fn tui_config_missing_notifications_field_defaults_to_enabled() {
             raw_output_mode: false,
             fullscreen_transcript: true,
             copy_on_select: Default::default(),
+            right_click_paste: Default::default(),
             alternate_screen: AltScreenMode::Auto,
             status_line: None,
             status_line_use_colors: true,
@@ -5921,6 +5923,7 @@ url = "https://sample.example/mcp"
                     "Selected Plugin".to_string(),
                 ),
                 /*selection_order*/ 0,
+                codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID,
                 selected.clone(),
             )],
         )
