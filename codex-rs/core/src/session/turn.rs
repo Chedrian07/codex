@@ -11,6 +11,7 @@ use crate::compact::InitialContextInjection;
 use crate::compact::run_inline_auto_compact_task;
 use crate::compact_remote_v2::run_inline_remote_auto_compact_task as run_inline_remote_auto_compact_task_v2;
 use crate::connectors;
+use crate::context::ContentFilterGuidance;
 use crate::context::ContextualUserFragment;
 use crate::context::UserVerificationNotice;
 use crate::environment_selection::TurnEnvironmentSnapshot;
@@ -282,11 +283,13 @@ pub(crate) async fn run_turn(
     let (world_state, display_roots) = tokio::join!(
         sess.record_context_updates_and_set_reference_context_item(first_step_context.as_ref()),
         async {
-            if first_step_context
-                .turn
-                .config
-                .features
-                .enabled(Feature::CwdRelativeTurnDiffs)
+            // Guardian must not wait for remote Git discovery just to display diff paths.
+            if crate::guardian::is_basic_session_source(&turn_context.session_source)
+                || first_step_context
+                    .turn
+                    .config
+                    .features
+                    .enabled(Feature::CwdRelativeTurnDiffs)
             {
                 first_step_context
                     .environments
@@ -733,6 +736,12 @@ pub(crate) async fn run_turn(
                             CodexErrorDetails::Interrupted | CodexErrorDetails::TurnAborted
                         ) {
                             return Err(err);
+                        }
+                        let error = err.to_codex_protocol_error();
+                        if matches!(error, CodexErrorInfo::UsageLimitExceeded) {
+                            // Preserve the completed answer while stopping automatic work.
+                            sess.emit_turn_error_lifecycle(turn_context.as_ref(), error)
+                                .await;
                         }
                         warn!(error = %err, "Post-turn compaction failed; preserving the completed turn");
                     }
@@ -1689,15 +1698,33 @@ async fn run_sampling_request(
 
         let original_input = original_input.get_or_insert(prompt.input);
 
-        let retry = handle_response_stream_error(
-            &mut retry_state,
-            max_retries,
-            err,
-            client_session,
-            &sess,
-            &turn_context,
-            ResponsesStreamRequest::Sampling,
-        )
+        let retry = async {
+            if matches!(err.details(), CodexErrorDetails::ContentFilter) {
+                let model_info = &step_context.settings.model_info;
+                let guidance = ContentFilterGuidance {
+                    text: codex_prompts::ResolvedModelMessages::from_model(model_info)
+                        .content_filter_guidance()
+                        .to_string(),
+                };
+                sess.record_conversation_items(
+                    &turn_context,
+                    model_info,
+                    &[ContextualUserFragment::into(guidance)],
+                )
+                .await;
+            }
+
+            handle_response_stream_error(
+                &mut retry_state,
+                max_retries,
+                err,
+                client_session,
+                &sess,
+                &turn_context,
+                ResponsesStreamRequest::Sampling,
+            )
+            .await
+        }
         .or_cancel(&preempt)
         .or_cancel(&cancellation_token)
         .await?;
