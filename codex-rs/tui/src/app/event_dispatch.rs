@@ -539,6 +539,7 @@ impl App {
                     self.refresh_in_memory_config_from_disk_best_effort("forking the thread")
                         .await;
                     let mut fork_config = self.config.clone();
+                    fork_config.daybreak_enabled = self.chat_widget.daybreak_enabled;
                     if app_server.uses_remote_workspace() {
                         fork_config.workspace_roots.clone_from(
                             &self.chat_widget.config_ref().workspace_roots,
@@ -578,6 +579,15 @@ impl App {
                             } else {
                                 None
                             };
+                            if !app_server.uses_embedded_app_server() {
+                                // Daemon tasks can start while the fork RPC is pending.
+                                for id in self.thread_event_channels.keys().copied()
+                                    .chain(self.agent_navigation.tracked_thread_ids())
+                                    .filter(|id| !self.side_threads.contains_key(id))
+                                {
+                                    self.agents_overview.dispatched_requests.entry(id).or_default();
+                                }
+                            }
                             self.detach_current_thread_for_navigation(app_server, Some(forked.session.thread_id)).await;
                             match self
                                 .replace_chat_widget_with_app_server_thread(
@@ -2374,7 +2384,6 @@ impl App {
                                         /*summary*/ None,
                                         /*service_tier*/ None,
                                         /*collaboration_mode*/ None,
-                                        /*personality*/ None,
                                     ),
                                 ));
                                 self.app_event_tx.send(AppEvent::UpdateAskForApprovalPolicy(
@@ -2438,6 +2447,9 @@ impl App {
                     }
                 }
             }
+            AppEvent::PersistDaybreakSelection { thread_id, enabled } => {
+                self.persist_daybreak_selection(app_server, thread_id, enabled).await;
+            }
             AppEvent::SelectSessionModel { model, effort } => {
                 self.app_event_tx.send(AppEvent::FollowTranscript);
                 self.select_session_model(app_server, model, effort).await;
@@ -2481,6 +2493,7 @@ impl App {
             AppEvent::OpenRealtimeSoundDevices => self.chat_widget.open_realtime_sound_devices(),
             AppEvent::OpenRealtimeVoices => self.open_realtime_voices(app_server).await,
             AppEvent::OpenRealtimeDevicePicker { kind } => self.list_realtime_devices(kind),
+            AppEvent::OpenRealtimeInputChannels { device } => self.chat_widget.open_realtime_input_channels(device),
             AppEvent::RealtimeDevicesListed { origin, kind, result } => {
                 if origin == self.active_thread_id {
                     match result {
@@ -2491,6 +2504,9 @@ impl App {
             }
             AppEvent::PersistRealtimeDevice { kind, name } => {
                 self.persist_realtime_device(kind, name).await;
+            }
+            AppEvent::PersistRealtimeInputChannel { channel } => {
+                self.persist_realtime_input_channel(channel).await;
             }
             AppEvent::PersistRealtimeVoiceSelection { voice } => {
                 self.persist_realtime_voice(app_server, voice).await;
@@ -2516,8 +2532,10 @@ impl App {
                     }
                     Err(err) => {
                         tracing::error!(error = %err, "failed to persist service tier selection");
+                        let error = format_config_error(&err);
                         self.chat_widget.add_error_message(format!(
-                            "Failed to save default service tier: {err}"
+                            "Failed to save default service tier: {error}\n\
+                             You can continue this task. To save the default, resolve the error above, then switch to a different tier and back to the desired tier."
                         ));
                     }
                 }

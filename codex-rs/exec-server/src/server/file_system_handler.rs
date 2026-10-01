@@ -28,6 +28,7 @@ use crate::protocol::FsCreateDirectoryParams;
 use crate::protocol::FsCreateDirectoryResponse;
 use crate::protocol::FsGetMetadataParams;
 use crate::protocol::FsGetMetadataResponse;
+use crate::protocol::FsOpenMode;
 use crate::protocol::FsOpenParams;
 use crate::protocol::FsOpenResponse;
 use crate::protocol::FsReadBlockParams;
@@ -41,6 +42,8 @@ use crate::protocol::FsRemoveParams;
 use crate::protocol::FsRemoveResponse;
 use crate::protocol::FsWalkParams;
 use crate::protocol::FsWalkResponse;
+use crate::protocol::FsWriteBlockParams;
+use crate::protocol::FsWriteBlockResponse;
 use crate::protocol::FsWriteFileParams;
 use crate::protocol::FsWriteFileResponse;
 use crate::rpc::internal_error;
@@ -122,6 +125,12 @@ impl FileSystemHandler {
         params: FsOpenParams,
     ) -> Result<FsOpenResponse, JSONRPCErrorError> {
         validate_file_handle_id(&params.handle_id)?;
+        // TODO(anp): Enable replacement opens when writable file streams are implemented.
+        if params.mode == FsOpenMode::Replace {
+            return Err(invalid_request(
+                "exec-server does not support writable file streams".to_string(),
+            ));
+        }
         let file = self
             .file_system
             .open_file_for_read(&params.path, params.sandbox.as_ref())
@@ -149,6 +158,17 @@ impl FileSystemHandler {
             chunk: block.bytes.into(),
             eof: block.eof,
         })
+    }
+
+    pub(crate) async fn write_block(
+        &self,
+        params: FsWriteBlockParams,
+    ) -> Result<FsWriteBlockResponse, JSONRPCErrorError> {
+        validate_file_handle_id(&params.handle_id)?;
+        // TODO(anp): Implement positional writes before advertising writable file streams.
+        Err(invalid_request(
+            "exec-server does not support writable file streams".to_string(),
+        ))
     }
 
     pub(crate) async fn close(
@@ -364,6 +384,7 @@ mod tests {
     use super::*;
     use crate::FileSystemSandboxContext;
     use crate::protocol::FsReadFileParams;
+
     use crate::protocol::FsWriteFileParams;
 
     #[tokio::test]

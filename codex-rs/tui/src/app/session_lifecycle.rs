@@ -495,7 +495,6 @@ impl App {
         if !self.chat_widget.realtime_conversation_is_running() {
             self.retain_realtime_replay_state_before_replace();
         }
-        chat_widget.cyber_policy_notice = self.chat_widget.cyber_policy_notice.clone();
         self.commit_animation = None;
         // Transfer the last-written terminal title to the replacement widget
         // so it knows what OSC title is currently displayed. Without this, the
@@ -797,6 +796,16 @@ impl App {
 
     pub(super) async fn reset_thread_event_state(&mut self) {
         let voice_owner = self.voice_owner_thread_id();
+        // Move retained tasks' approvals to background routing before clearing request bookkeeping.
+        for (thread_id, requests) in &mut self.agents_overview.dispatched_requests {
+            if let Some(channel) = self.thread_event_channels.get(thread_id) {
+                for request in channel.store.lock().await.pending_replay_requests() {
+                    if !requests.iter().any(|pending| pending.id() == request.id()) {
+                        requests.push(request);
+                    }
+                }
+            }
+        }
         if voice_owner.is_some() {
             for (thread_id, channel) in &self.thread_event_channels {
                 if Some(*thread_id) != voice_owner {
@@ -808,7 +817,8 @@ impl App {
             }
         }
         self.thread_event_listener_tasks.retain(|id, task| {
-            if Some(*id) == voice_owner {
+            if Some(*id) == voice_owner || self.agents_overview.dispatched_requests.contains_key(id)
+            {
                 true
             } else {
                 task.abort();
@@ -1027,6 +1037,7 @@ impl App {
                 self.local_settings = self.local_settings.reloaded(&config);
                 self.refresh_server_version_overview_notice(CODEX_CLI_VERSION);
                 self.config = config;
+                self.remember_launch_permissions();
 
                 let name_error = if let Some(name) = new_thread_name {
                     match app_server
