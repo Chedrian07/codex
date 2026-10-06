@@ -68,6 +68,7 @@ use codex_protocol::models::InternalChatMessageMetadataPassthrough;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EnvironmentConfigState;
 use codex_protocol::protocol::ErrorEvent;
@@ -565,6 +566,7 @@ async fn get_status_returns_not_found_without_manager() {
 #[tokio::test]
 async fn on_event_updates_status_from_task_started() {
     let status = agent_status_from_event(&EventMsg::TurnStarted(TurnStartedEvent {
+        turn_attribution: None,
         turn_id: "turn-1".to_string(),
         root_turn_id: None,
         trace_id: None,
@@ -589,6 +591,7 @@ async fn on_event_updates_status_from_task_complete() {
         ),
     ] {
         let status = agent_status_from_event(&EventMsg::TurnComplete(TurnCompleteEvent {
+            root_turn_id: None,
             turn_id: "turn-1".to_string(),
             started_at: None,
             last_agent_message: Some("done".to_string()),
@@ -616,6 +619,7 @@ async fn on_event_updates_status_from_error() {
 #[tokio::test]
 async fn on_event_updates_status_from_turn_aborted() {
     let status = agent_status_from_event(&EventMsg::TurnAborted(TurnAbortedEvent {
+        root_turn_id: None,
         turn_id: Some("turn-1".to_string()),
         started_at: None,
         reason: TurnAbortReason::Interrupted,
@@ -1860,6 +1864,62 @@ async fn spawn_agent_creates_thread_and_sends_prompt() {
     wait_for_recorded_user_message(thread.as_ref(), "spawned").await;
 }
 
+#[test_case::test_case(None, ReasoningEffort::Medium; "model default")]
+#[test_case::test_case(Some(ReasoningEffort::Ultra), ReasoningEffort::XHigh; "resolved ultra")]
+#[tokio::test]
+async fn v2_spawn_resolves_reported_effort_without_changing_child_selection(
+    selected_effort: Option<ReasoningEffort>,
+    reported_effort: ReasoningEffort,
+) {
+    let (home, mut config) = test_config().await;
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("enable v2");
+    config.model_reasoning_effort = selected_effort.clone();
+    let harness = AgentControlHarness::new_with_config(home, config).await;
+    let (parent_id, parent) = harness.start_thread().await;
+    let source = thread_spawn_source(
+        parent_id,
+        &parent.session_source,
+        next_thread_spawn_depth(&parent.session_source),
+        /*agent_role*/ None,
+        Some("worker".to_string()),
+    )
+    .expect("child source");
+    let (agent, snapshot) = harness
+        .control
+        .spawn(SpawnRequest {
+            caller: parent_id,
+            config: harness.config.clone(),
+            input: AgentInput::Message {
+                message: AgentMessage::Plaintext("child task".to_string()),
+                mode: MessageDeliveryMode::TriggerTurn,
+            },
+            source,
+            options: SpawnAgentOptions {
+                parent_thread_id: Some(parent_id),
+                ..Default::default()
+            },
+        })
+        .await
+        .expect("spawn child");
+    let child = harness
+        .manager
+        .get_thread(agent.thread_id)
+        .await
+        .expect("child is registered");
+    assert_eq!(
+        (
+            snapshot.reasoning_effort,
+            child.config_snapshot().await.reasoning_effort,
+        ),
+        (Some(reported_effort), selected_effort),
+    );
+    child.shutdown_and_wait().await.expect("shutdown child");
+    parent.shutdown_and_wait().await.expect("shutdown parent");
+}
+
 #[tokio::test]
 async fn pending_environment_failure_reaches_child_and_grandchild() {
     let (home, mut config) = test_config().await;
@@ -2256,7 +2316,14 @@ async fn spawn_agent_fork_sanitizes_inherited_compaction_metadata() {
     let (parent_thread_id, parent_thread) = harness.start_paginated_thread().await;
     let parent_resume_metadata = codex_history::CompactionResumeMetadata {
         multi_agent_version: Some(MultiAgentVersion::V2),
-        last_started_turn_id: Some("parent-turn".into()),
+        last_started_turn_id: Some("parent-turn".to_string()),
+        turn_attribution: Some(codex_history::TurnAttribution {
+            turn_id: "parent-turn".to_string(),
+            turn_trigger: Some("automation".to_string()),
+            parent_turn_id: Some("initiating-turn".to_string()),
+            initiating_agent_path: Some(codex_protocol::AgentPath::root()),
+            root_turn_id: Some("root-turn".to_string()),
+        }),
         previous_turn_settings: Some(codex_history::PreviousTurnSettings {
             model: "parent-model".into(),
             comp_hash: None,
@@ -2382,6 +2449,7 @@ async fn spawn_agent_fork_sanitizes_inherited_compaction_metadata() {
         inherited_resume_metadata,
         &codex_history::CompactionResumeMetadata {
             multi_agent_version: Some(MultiAgentVersion::V1),
+            turn_attribution: None,
             ..parent_resume_metadata
         }
     );
@@ -3287,6 +3355,7 @@ async fn spawn_agent_full_fork_legacy_compaction_rebuilds_child_instructions_onc
                 resume_metadata: Some(codex_history::CompactionResumeMetadata {
                     multi_agent_version: Some(MultiAgentVersion::V2),
                     last_started_turn_id: None,
+                    turn_attribution: None,
                     previous_turn_settings: Some(codex_history::PreviousTurnSettings {
                         model: "parent-model".into(),
                         comp_hash: None,
@@ -3380,6 +3449,7 @@ async fn spawn_agent_full_fork_legacy_compaction_rebuilds_child_instructions_onc
             Some(codex_history::CompactionResumeMetadata {
                 multi_agent_version: Some(MultiAgentVersion::V2),
                 last_started_turn_id: None,
+                turn_attribution: None,
                 previous_turn_settings: None,
             })
         );
@@ -3937,6 +4007,7 @@ async fn multi_agent_v2_completion_ignores_dead_direct_parent() {
         .send_event(
             tester_turn.as_ref(),
             EventMsg::TurnComplete(TurnCompleteEvent {
+                root_turn_id: None,
                 turn_id: tester_turn.sub_id.clone(),
                 started_at: None,
                 last_agent_message: Some("done".to_string()),
@@ -4019,6 +4090,7 @@ async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
         .send_event(
             tester_turn.as_ref(),
             EventMsg::TurnComplete(TurnCompleteEvent {
+                root_turn_id: None,
                 turn_id: tester_turn.sub_id.clone(),
                 started_at: None,
                 last_agent_message: Some("done".to_string()),
