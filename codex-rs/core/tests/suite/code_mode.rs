@@ -1653,11 +1653,10 @@ await new Promise(() => {});
                     .iter()
                     .all(|item| item["call_id"] != "call-1")
             );
-            assert!(
-                final_request.function_call_output("call-2")
-                    ["internal_chat_message_metadata_passthrough"]
-                    .get("tool_calls_complete")
-                    .is_none()
+            assert_eq!(
+                final_request.function_call_output("call-2")["internal_chat_message_metadata_passthrough"]
+                    ["tool_calls_complete"],
+                true
             );
         }
     }
@@ -3597,7 +3596,7 @@ async fn code_mode_complete_call_survives_unrelated_truncation() -> Result<()> {
                 .get("_codex_executed_tool_call_truncated")
                 .is_some()))
     );
-    assert!(overflow.get("tool_calls_complete").is_none());
+    assert_eq!(overflow["tool_calls_complete"], true);
 
     let complete =
         &request.custom_tool_call_output("call-2")["internal_chat_message_metadata_passthrough"];
@@ -8366,8 +8365,13 @@ async fn code_mode_renders_local_refs_in_outbound_exec_description() -> Result<(
     Ok(())
 }
 
+#[test_case("codex_app", "codex_app__hidden_dynamic_tool"; "named_namespace")]
+#[test_case("functions", "hidden_dynamic_tool"; "functions_namespace")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn code_mode_search_normalizes_and_calls_deferred_dynamic_tools() -> Result<()> {
+async fn code_mode_search_normalizes_and_calls_deferred_dynamic_tools(
+    namespace: &str,
+    code_mode_name: &str,
+) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
@@ -8375,6 +8379,16 @@ async fn code_mode_search_normalizes_and_calls_deferred_dynamic_tools() -> Resul
         .with_model_info_override("gpt-5.5", |model_info| {
             model_info.supports_search_tool = true;
             model_info.tool_mode = Some(ToolMode::CodeMode);
+            model_info
+                .model_messages
+                .get_or_insert_default()
+                .tools
+                .get_or_insert_default()
+                .functions_namespace_functions_description_prefixes =
+                Some(std::collections::BTreeMap::from([(
+                    "hidden-dynamic-tool".to_string(),
+                    "Function guidance.".to_string(),
+                )]));
         })
         .with_config(|config| {
             let _ = config.features.enable(Feature::CodeMode);
@@ -8399,7 +8413,7 @@ async fn code_mode_search_normalizes_and_calls_deferred_dynamic_tools() -> Resul
                     )],
                 }),
                 DynamicToolSpec::Namespace(DynamicToolNamespaceSpec {
-                    name: "codex_app".to_string(),
+                    name: namespace.to_string(),
                     description: "Codex app tools.".to_string(),
                     tools: vec![DynamicToolNamespaceTool::Function(
                         DynamicToolFunctionSpec {
@@ -8446,6 +8460,17 @@ text(
 "#;
 
     responses::mount_sse_once(
+        &server,
+        sse(vec![
+            responses::ev_tool_search_call(
+                "find",
+                &serde_json::json!({"query": "hidden-dynamic-tool"}),
+            ),
+            ev_completed("search"),
+        ]),
+    )
+    .await;
+    let search_response = responses::mount_sse_once(
         &server,
         sse(vec![
             ev_response_created("resp-1"),
@@ -8505,7 +8530,7 @@ text(
         _ => None,
     })
     .await;
-    assert_eq!(request.namespace.as_deref(), Some("codex_app"));
+    assert_eq!(request.namespace.as_deref(), Some(namespace));
     assert_eq!(request.tool, "hidden-dynamic-tool");
     assert_eq!(request.arguments, serde_json::json!({ "city": "Paris" }));
     test.codex
@@ -8539,13 +8564,35 @@ text(
     )?;
     assert_eq!(
         parsed.get("name"),
-        Some(&Value::String("codex_app__hidden_dynamic_tool".to_string()))
+        Some(&Value::String(code_mode_name.to_string()))
     );
     assert_eq!(
         parsed.get("out"),
         Some(&Value::String("hidden-ok".to_string()))
     );
     assert_eq!(parsed["recoveredFromInvalidArguments"], true);
+    let loaded = search_response.single_request().tool_search_output("find");
+    let loaded = loaded["tools"]
+        .as_array()
+        .expect("loaded tools")
+        .iter()
+        .find(|tool| tool["name"] == namespace)
+        .expect("loaded namespace");
+    assert_eq!(
+        loaded["tools"][0]["description"],
+        if namespace == "functions" {
+            "Function guidance.\n\nA hidden dynamic tool."
+        } else {
+            "A hidden dynamic tool."
+        }
+    );
+    assert_eq!(
+        parsed["description"]
+            .as_str()
+            .expect("tool description")
+            .contains("Function guidance.\n\nA hidden dynamic tool."),
+        namespace == "functions",
+    );
     assert!(
         parsed
             .get("description")
@@ -8554,7 +8601,7 @@ text(
                 description.contains("Codex app tools.")
                     && description.contains("A hidden dynamic tool.")
                     && description.contains("declare const tools:")
-                    && description.contains("codex_app__hidden_dynamic_tool(args:")
+                    && description.contains(&format!("{code_mode_name}(args:"))
             })
     );
 
@@ -9164,7 +9211,7 @@ text(JSON.stringify({
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn code_mode_oversized_websocket_yield_keeps_later_wait_incomplete() -> Result<()> {
+async fn code_mode_argument_truncation_preserves_later_wait_completeness() -> Result<()> {
     skip_if_no_network!(Ok(()));
     const LIMIT: usize = 15 * 1024 * 1024;
     const PROMPT: &str = "Record a call, yield, then stop";
@@ -9309,7 +9356,7 @@ await new Promise(() => {});
     let terminal = find_output(&terminal_request, "wait-a");
     assert_eq!(
         terminal["internal_chat_message_metadata_passthrough"].get("tool_calls_complete"),
-        None
+        Some(&Value::Bool(true))
     );
 
     // Compare ordinary outputs against the live session history. No actual
