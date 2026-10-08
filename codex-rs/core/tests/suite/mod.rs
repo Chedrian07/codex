@@ -118,6 +118,7 @@ mod hooks;
 mod hooks_executor;
 #[cfg(not(target_os = "windows"))]
 mod hooks_mcp;
+mod hooks_plugin_policy_refresh;
 mod image_rollout;
 mod injected_models_cache;
 #[cfg(not(target_os = "windows"))]
@@ -205,7 +206,6 @@ mod search_tool;
 mod settings_commits;
 mod settings_constraints;
 mod shell_snapshot;
-mod skill_approval;
 mod skills;
 mod skills_extension;
 mod spawn_agent_description;
@@ -240,8 +240,6 @@ mod unified_exec_mxc_powershell;
 mod unified_exec_process_events;
 mod unified_exec_stdin_approval;
 mod unified_exec_stdin_review_size;
-#[cfg(unix)]
-mod unified_exec_zsh_fork_approvals;
 mod unstable_features_warning;
 mod user_notification;
 mod user_shell_cmd;

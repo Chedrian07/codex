@@ -130,6 +130,8 @@ use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::BaseInstructionsProvenance;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::ContentItemMetadata;
+use codex_protocol::models::ContentItemNamespace;
 use codex_protocol::models::ImageReference;
 use codex_protocol::models::InternalChatMessageMetadataPassthrough;
 use codex_protocol::models::PermissionProfile;
@@ -401,7 +403,6 @@ use codex_protocol::turn_input::TurnStartOptions;
 use codex_protocol::user_input::UserInput;
 use codex_skills_extension::HostSkillsService;
 use codex_tools::ToolName;
-use codex_tools::UnifiedExecShellMode;
 use codex_utils_absolute_path::AbsolutePathBuf;
 #[cfg(test)]
 use codex_utils_stream_parser::ProposedPlanSegment;
@@ -554,6 +555,7 @@ impl Session {
     }
 
     async fn spawn_internal(args: SessionSpawnArgs) -> CodexResult<(Arc<Self>, SessionIo)> {
+        args.config.validate_windows_mxc_requirement()?;
         let SessionSpawnArgs {
             startup,
             config,
@@ -612,7 +614,16 @@ impl Session {
             match thread_extension_init.get::<Vec<SelectedCapabilityRoot>>() {
                 Some(roots) => roots.as_ref().clone(),
                 None => {
-                    let roots = conversation_history.get_selected_capability_roots();
+                    // Resume restores this thread's saved roots, including roots for environments
+                    // it will select again later. New children inherit roots regardless of copied history.
+                    let roots = if !matches!(&conversation_history, InitialHistory::Resumed(_))
+                        && isolation == codex_extension_api::SessionIsolation::Inherit
+                        && let Some(environments) = &inherited_environments
+                    {
+                        environments.selected_capability_roots()
+                    } else {
+                        conversation_history.get_selected_capability_roots()
+                    };
                     if !roots.is_empty() {
                         thread_extension_init.insert(roots.clone());
                     }
@@ -2165,27 +2176,31 @@ impl Session {
         state.session_configuration.provider.info().clone()
     }
 
-    pub(crate) async fn refresh_hooks(&self, config: Arc<Config>) {
-        let disabled_plugin_ids = self.state.lock().await.active_disabled_plugin_ids.clone();
-        let environments = self.services.turn_environments.snapshot().await;
-        let hooks_config = build_hooks_config(
-            config.as_ref(),
-            self.services.plugins_manager.as_ref(),
-            environments.single_local_environment(),
-            &disabled_plugin_ids,
-        )
-        .await;
+    pub(crate) async fn refresh_hooks(&self, mut config: Arc<Config>) {
+        loop {
+            let disabled_plugin_ids = self.state.lock().await.active_disabled_plugin_ids.clone();
+            let environments = self.services.turn_environments.snapshot().await;
+            let hooks_config = build_hooks_config(
+                config.as_ref(),
+                self.services.plugins_manager.as_ref(),
+                environments.single_local_environment(),
+                &disabled_plugin_ids,
+            )
+            .await;
 
-        let state = self.state.lock().await;
-        // A newer refresh may have updated the config while this hook build was in flight.
-        // Only publish hooks derived from the current config snapshot.
-        if Arc::ptr_eq(
-            &state.session_configuration.original_config_do_not_use,
-            &config,
-        ) && state.active_disabled_plugin_ids == disabled_plugin_ids
-        {
-            let hooks = self.hooks().reconfigured(hooks_config);
-            self.services.hooks.store(Arc::new(hooks));
+            let state = self.state.lock().await;
+            if Arc::ptr_eq(
+                &state.session_configuration.original_config_do_not_use,
+                &config,
+            ) && state.active_disabled_plugin_ids == disabled_plugin_ids
+            {
+                let hooks = self.hooks().reconfigured(hooks_config);
+                self.services.hooks.store(Arc::new(hooks));
+                return;
+            }
+            // Unrelated updates can replace the owner too. Rebuild current inputs
+            // so they cannot strand a pending plugin-policy refresh.
+            config = Arc::clone(&state.session_configuration.original_config_do_not_use);
         }
     }
 
@@ -3514,6 +3529,7 @@ impl Session {
             *internal_chat_message_metadata_passthrough =
                 Some(InternalChatMessageMetadataPassthrough {
                     content_item_kinds: Some(content_item_kinds),
+                    content_item_metadata: Some(vec![ContentItemMetadata::user(); content.len()]),
                     ..Default::default()
                 });
         }
@@ -3872,6 +3888,7 @@ impl Session {
             );
             // A step keeps the plugins from the environments it captured, even if shared MCP
             // moves on to another environment. Its skill tools and the model use this same copy.
+            // Policy follows this step's MCP binding, which may have refreshed mid-turn.
             let selected_plugins = self
                 .services
                 .mcp_manager
@@ -3886,6 +3903,7 @@ impl Session {
                     )
                     .with_session_source(&turn_context.session_source)
                     .with_selected_environments(&environments.all_selections()),
+                    &mcp.config().plugins,
                     &turn_context.disabled_plugin_ids,
                 )
                 .await;
@@ -3949,7 +3967,31 @@ impl Session {
         model_info: &ModelInfo,
         communication: InterAgentCommunication,
     ) {
-        let response_item = communication.to_model_input_item();
+        let mut response_item = communication.to_model_input_item();
+        if let ResponseItem::AgentMessage {
+            content,
+            internal_chat_message_metadata_passthrough,
+            ..
+        } = &mut response_item
+        {
+            internal_chat_message_metadata_passthrough
+                .get_or_insert_default()
+                .content_item_metadata
+                .get_or_insert_with(|| {
+                    vec![
+                        ContentItemMetadata::tool(Some(
+                            turn_context
+                                .config
+                                .multi_agent_v2
+                                .tool_namespace
+                                .clone()
+                                .map(ContentItemNamespace::from)
+                                .unwrap_or(ContentItemNamespace::Functions),
+                        ));
+                        content.len()
+                    ]
+                });
+        }
         let (items, _) = self
             .prepare_conversation_items_for_history(
                 turn_context,
@@ -4275,7 +4317,7 @@ impl Session {
         let turn_context = step_context.turn.as_ref();
         let mut developer_sections = Vec::<RenderedFragment>::with_capacity(8);
         let mut contextual_user_sections = Vec::<RenderedFragment>::with_capacity(2);
-        let mut separate_developer_sections = Vec::<RenderedFragment>::new();
+        let mut separate_developer_messages = Vec::<ResponseItem>::new();
         let mut context_window_hints = Vec::new();
         let (session_source, auto_compact_window_ids) = {
             let state = self.state.lock().await;
@@ -4332,7 +4374,7 @@ impl Session {
             {
                 match fragment.slot() {
                     PromptSlot::ContextWindow => {
-                        context_window_hints.push(fragment.text().to_string());
+                        context_window_hints.push(fragment.into_content());
                     }
                     PromptSlot::DeveloperPolicy | PromptSlot::DeveloperCapabilities => {
                         developer_sections.push(fragment.into());
@@ -4370,7 +4412,7 @@ impl Session {
                 .token_budget
                 .as_ref()
                 .is_some_and(|config| config.use_history_notes_extension)
-                && let Some(mcp_result) = self
+                && let Some((text, source_tool_namespace)) = self
                     .services
                     .mcp_runtime
                     .latest_call_tool(
@@ -4386,8 +4428,9 @@ impl Session {
                     )
                     .await
                     .ok()
-                    .and_then(|result| {
-                        let text = result
+                    .and_then(|call| {
+                        let text = call
+                            .result
                             .content
                             .iter()
                             .filter_map(|content| {
@@ -4396,12 +4439,16 @@ impl Session {
                             .filter(|text| !text.is_empty())
                             .collect::<Vec<_>>()
                             .join("\n");
-                        (!text.is_empty()).then_some(text)
+                        (!text.is_empty()).then_some((text, call.source_tool_namespace))
                     })
             {
-                context_window_hints.push(mcp_result);
+                context_window_hints.push(codex_context_fragments::AnnotatedContent::text(
+                    text,
+                    ContentItemKind("notes.thread_hint".to_string()),
+                    ContentItemMetadata::tool(source_tool_namespace.map(Into::into)),
+                ));
             }
-            separate_developer_sections.push(
+            separate_developer_messages.push(
                 crate::context::TokenBudgetContext::new(
                     session_source
                         .get_agent_path()
@@ -4409,9 +4456,8 @@ impl Session {
                     auto_compact_window_ids.first_window_id,
                     auto_compact_window_ids.previous_window_id,
                     auto_compact_window_ids.window_id,
-                    (!context_window_hints.is_empty()).then(|| context_window_hints.join("\n")),
                 )
-                .render_fragment(),
+                .render_with_hints(context_window_hints),
             );
         }
         let (snapshot, updates) = world_state.render_full();
@@ -4451,13 +4497,13 @@ impl Session {
                     "developer"
                         if fragment.markers().0 == MultiAgentRoleInstructions::type_markers().0 =>
                     {
-                        separate_developer_sections.push(fragment.render_fragment());
+                        separate_developer_messages.push(fragment.render_fragment().into());
                     }
                     "developer"
                         if update.placement == Placement::Standalone
                             && fragment.markers().0.is_empty() =>
                     {
-                        separate_developer_sections.push(fragment.render_fragment());
+                        separate_developer_messages.push(fragment.render_fragment().into());
                     }
                     "developer" => developer_sections.push(fragment.render_fragment()),
                     "user" => contextual_user_sections.push(fragment.render_fragment()),
@@ -4478,13 +4524,7 @@ impl Session {
             ) {
                 items.push(developer_message);
             }
-            for section in separate_developer_sections.drain(..) {
-                if let Some(developer_message) =
-                    crate::context_manager::updates::build_rendered_message(vec![section])
-                {
-                    items.push(developer_message);
-                }
-            }
+            items.append(&mut separate_developer_messages);
             if let Some(initial_multi_agent_mode) = initial_multi_agent_mode
                 && let Some(message) =
                     crate::context_manager::updates::build_rendered_message(vec![
