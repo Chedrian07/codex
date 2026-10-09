@@ -161,7 +161,6 @@ use codex_protocol::mcp::McpAttributionStatus;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
-use codex_protocol::models::ContentItemMetadata;
 use codex_protocol::models::InternalChatMessageMetadataPassthrough;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AskForApproval;
@@ -2770,11 +2769,6 @@ async fn record_inter_agent_communication_sets_turn_id_in_rollout_and_resume() {
         /*trigger_turn*/ false,
     );
     let mut expected_item = communication.to_model_input_item();
-    let mut expected = serde_json::to_value(&expected_item).unwrap();
-    expected["internal_chat_message_metadata_passthrough"] = json!({
-        "content_item_metadata": [{"harness_injected": true, "source_tool_namespace": "collaboration"}],
-    });
-    expected_item = serde_json::from_value(expected).unwrap();
     expected_item.set_turn_id_if_missing(&turn_context.sub_id);
 
     session
@@ -3161,11 +3155,6 @@ async fn prepares_resumed_history_before_installing_it() {
                         ContentItemKind("images.preparation_error".to_string()),
                         ContentItemKind("images.preparation_error".to_string()),
                         ContentItemKind("unknown".to_string()),
-                    ]),
-                    content_item_metadata: Some(vec![
-                        ContentItemMetadata::harness(),
-                        ContentItemMetadata::harness(),
-                        ContentItemMetadata::default(),
                     ]),
                     ..Default::default()
                 },
@@ -4134,9 +4123,6 @@ async fn record_initial_history_assigns_and_persists_id_for_forked_response_item
         internal_chat_message_metadata_passthrough: Some(InternalChatMessageMetadataPassthrough {
             content_item_kinds: Some(vec![ContentItemKind(
                 "generic.developer_instructions".to_string(),
-            )]),
-            content_item_metadata: Some(vec![ContentItemMetadata::developer_instructions(
-                /*from_additional_requirements*/ false,
             )]),
             ..Default::default()
         }),
@@ -6968,6 +6954,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         services,
         git_enrichment_policy: GitEnrichmentPolicy::Fresh,
         fork_persistence: ForkPersistence::Copied,
+        history_initialization: HistoryInitialization::New,
         forked_from_ordinal_exclusive: None,
         next_internal_sub_id: AtomicU64::new(0),
     };
@@ -7142,6 +7129,7 @@ async fn make_session_with_config_and_rx(
         tx_event,
         agent_status_tx,
         InitialHistory::New,
+        HistoryInitialization::New,
         ForkPersistence::Copied,
         SessionSource::Exec,
         skills_service,
@@ -7260,6 +7248,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
     ));
     let environment_manager = Arc::new(EnvironmentManager::default_for_tests());
 
+    let history_initialization = HistoryInitialization::from_history(&initial_history);
     let session = Session::new(
         /*startup*/ None,
         session_configuration,
@@ -7275,6 +7264,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
         tx_event,
         agent_status_tx,
         initial_history,
+        history_initialization,
         ForkPersistence::Copied,
         session_source,
         skills_service,
@@ -9231,6 +9221,7 @@ where
         services,
         git_enrichment_policy: GitEnrichmentPolicy::Fresh,
         fork_persistence: ForkPersistence::Copied,
+        history_initialization: HistoryInitialization::New,
         forked_from_ordinal_exclusive: None,
         next_internal_sub_id: AtomicU64::new(0),
     });

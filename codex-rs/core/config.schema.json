@@ -117,7 +117,7 @@
       "description": "Analytics settings loaded from config.toml. Fields are optional so we can apply defaults.",
       "properties": {
         "enabled": {
-          "description": "When `false`, disables analytics across Codex product surfaces in this profile.",
+          "description": "When `false`, disables OpenAI analytics across Codex product surfaces in this profile. Custom OTLP metrics exporters remain enabled; set `otel.metrics_exporter = \"none\"` to disable them.",
           "type": "boolean"
         }
       },
@@ -854,6 +854,9 @@
             "context_management": {
               "$ref": "#/definitions/FeatureToml_for_ContextManagementConfigToml"
             },
+            "credential_masking": {
+              "type": "boolean"
+            },
             "current_time_reminder": {
               "$ref": "#/definitions/FeatureToml_for_CurrentTimeReminderConfigToml"
             },
@@ -936,6 +939,9 @@
               "type": "boolean"
             },
             "guardian_root_handoff_context": {
+              "type": "boolean"
+            },
+            "guardian_trust_orchestrator_connectors": {
               "type": "boolean"
             },
             "guardianv2": {
@@ -1379,7 +1385,7 @@
       "type": "object"
     },
     "CopyOnSelect": {
-      "description": "When transcript mouse selections are copied on release.",
+      "description": "When mouse selections are copied on release.",
       "oneOf": [
         {
           "description": "Use the terminal-specific default.",
@@ -1389,7 +1395,7 @@
           "type": "string"
         },
         {
-          "description": "Copy every nonempty transcript mouse selection on release.",
+          "description": "Copy every nonempty transcript or footer mouse selection on release.",
           "enum": [
             "always"
           ],
@@ -3427,7 +3433,7 @@
               "$ref": "#/definitions/OtelExporterKind"
             }
           ],
-          "description": "Optional metrics exporter"
+          "description": "Metrics exporter. Defaults to `statsig`, which follows `analytics.enabled`. Custom OTLP exporters are independent of `analytics.enabled`; `none` disables metrics export."
         },
         "span_attributes": {
           "additionalProperties": {
@@ -4608,7 +4614,7 @@
             }
           ],
           "default": "auto",
-          "description": "Copy selected transcript text when the mouse button is released. Defaults to `auto`: enabled except in direct terminals known to forward their native copy shortcut (Ghostty 1.2+, Kitty on macOS, Windows Terminal, and VS Code on Windows). Unknown terminals, Ghostty without a recognized version, and tmux/Zellij default to copying."
+          "description": "Copy selected transcript or footer text when the mouse button is released. Defaults to `auto`: enabled except in direct terminals known to forward their native copy shortcut (Ghostty 1.2+, Kitty on macOS, Windows Terminal, and VS Code on Windows). Unknown terminals, Ghostty without a recognized version, and tmux/Zellij default to copying."
         },
         "disable_paste_burst": {
           "description": "When true, disables burst-paste detection for typed input entirely. All characters are inserted as they are received, and no buffering or placeholder replacement will occur for fast keypress bursts. Overrides the legacy top-level `disable_paste_burst` setting. Defaults to `false`.",
@@ -4709,6 +4715,7 @@
               "copy": null,
               "find_transcript": null,
               "focus_activity": null,
+              "leader": null,
               "open_agents": null,
               "open_external_editor": null,
               "open_transcript": null,
@@ -5512,6 +5519,14 @@
           ],
           "description": "Focus activity groups in the owned transcript to inspect their details."
         },
+        "leader": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Prefix for persistent, context-aware shortcut menus."
+        },
         "open_agents": {
           "allOf": [
             {
@@ -5707,6 +5722,7 @@
             "copy": null,
             "find_transcript": null,
             "focus_activity": null,
+            "leader": null,
             "open_agents": null,
             "open_external_editor": null,
             "open_transcript": null,
@@ -6826,7 +6842,7 @@
           "$ref": "#/definitions/AnalyticsConfigToml"
         }
       ],
-      "description": "When `false`, disables analytics across Codex product surfaces in this machine. Defaults to `true`."
+      "description": "When `enabled` is `false`, disables OpenAI analytics across Codex product surfaces on this machine. Custom OTLP metrics exporters are controlled by `otel.metrics_exporter`. When unset, the default depends on the client."
     },
     "approval_policy": {
       "allOf": [
@@ -7112,6 +7128,9 @@
         "context_management": {
           "$ref": "#/definitions/FeatureToml_for_ContextManagementConfigToml"
         },
+        "credential_masking": {
+          "type": "boolean"
+        },
         "current_time_reminder": {
           "$ref": "#/definitions/FeatureToml_for_CurrentTimeReminderConfigToml"
         },
@@ -7194,6 +7213,9 @@
           "type": "boolean"
         },
         "guardian_root_handoff_context": {
+          "type": "boolean"
+        },
+        "guardian_trust_orchestrator_connectors": {
           "type": "boolean"
         },
         "guardianv2": {

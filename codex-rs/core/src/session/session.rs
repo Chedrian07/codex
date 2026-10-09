@@ -95,6 +95,7 @@ pub(crate) struct Session {
     pub(crate) services: SessionServices,
     pub(super) git_enrichment_policy: GitEnrichmentPolicy,
     pub(super) fork_persistence: ForkPersistence,
+    pub(super) history_initialization: HistoryInitialization,
     pub(super) forked_from_ordinal_exclusive: Option<u64>,
     pub(super) next_internal_sub_id: AtomicU64,
 }
@@ -740,6 +741,7 @@ impl Session {
         context_window_id: uuid::Uuid,
     ) -> CodexResponsesMetadata {
         CodexResponsesMetadata {
+            history_initialization: Some(self.history_initialization),
             window_number: Some(window_number),
             context_window_id: Some(context_window_id),
             mcp_attribution: Some(self.services.executed_tool_calls.mcp_attribution_snapshot()),
@@ -774,6 +776,7 @@ impl Session {
         tx_event: Sender<Event>,
         agent_status: watch::Sender<AgentStatus>,
         mut initial_history: InitialHistory,
+        history_initialization: HistoryInitialization,
         fork_persistence: ForkPersistence,
         session_source: SessionSource,
         skills_service: Arc<HostSkillsService>,
@@ -1399,7 +1402,8 @@ impl Session {
                 .user_shell_override
                 .clone()
                 .unwrap_or_else(shell::default_user_shell);
-            let credential_broker_available = config.features.enabled(Feature::NetworkProxy)
+            let credential_broker_available = (config.features.enabled(Feature::NetworkProxy)
+                || config.features.enabled(Feature::CredentialMasking))
                 && config
                     .config_layer_stack
                     .requirements()
@@ -1407,12 +1411,13 @@ impl Session {
                     .as_ref()
                     .is_none_or(|network| network.value.enabled != Some(false));
             let credential_broker_configured = credential_broker_available
-                && effective_config
-                    .get("features")
-                    .and_then(|features| features.get("network_proxy"))
-                    .and_then(|network_proxy| network_proxy.get("credential_broker"))
-                    .and_then(TomlValue::as_bool)
-                    .unwrap_or(false);
+                && (config.features.enabled(Feature::CredentialMasking)
+                    || effective_config
+                        .get("features")
+                        .and_then(|features| features.get("network_proxy"))
+                        .and_then(|network_proxy| network_proxy.get("credential_broker"))
+                        .and_then(TomlValue::as_bool)
+                        .unwrap_or(false));
             let credential_broker_active = credential_broker_configured
                 && config
                     .permissions
@@ -1837,6 +1842,7 @@ impl Session {
                 services,
                 git_enrichment_policy,
                 fork_persistence,
+                history_initialization,
                 forked_from_ordinal_exclusive,
                 next_internal_sub_id: AtomicU64::new(0),
             });

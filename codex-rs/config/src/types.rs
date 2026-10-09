@@ -246,7 +246,8 @@ pub enum HistoryPersistence {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct AnalyticsConfigToml {
-    /// When `false`, disables analytics across Codex product surfaces in this profile.
+    /// When `false`, disables OpenAI analytics across Codex product surfaces in this profile.
+    /// Custom OTLP metrics exporters remain enabled; set `otel.metrics_exporter = "none"` to disable them.
     pub enabled: Option<bool>,
 }
 
@@ -641,7 +642,8 @@ pub struct OtelConfigToml {
     /// Optional trace exporter
     pub trace_exporter: Option<OtelExporterKind>,
 
-    /// Optional metrics exporter
+    /// Metrics exporter. Defaults to `statsig`, which follows `analytics.enabled`.
+    /// Custom OTLP exporters are independent of `analytics.enabled`; `none` disables metrics export.
     pub metrics_exporter: Option<OtelExporterKind>,
 
     /// Attributes to add to every exported trace span.
@@ -777,14 +779,14 @@ pub enum RightClickPaste {
     Off,
 }
 
-/// When transcript mouse selections are copied on release.
+/// When mouse selections are copied on release.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum CopyOnSelect {
     /// Use the terminal-specific default.
     #[default]
     Auto,
-    /// Copy every nonempty transcript mouse selection on release.
+    /// Copy every nonempty transcript or footer mouse selection on release.
     Always,
     /// Require an explicit copy action.
     Never,
@@ -889,7 +891,7 @@ pub struct Tui {
     #[schemars(schema_with = "crate::tui_mouse_scroll::schema")]
     pub mouse_scroll_speed: Option<f64>,
 
-    /// Copy selected transcript text when the mouse button is released.
+    /// Copy selected transcript or footer text when the mouse button is released.
     /// Defaults to `auto`: enabled except in direct terminals known to forward their native
     /// copy shortcut (Ghostty 1.2+, Kitty on macOS, Windows Terminal, and VS Code on Windows).
     /// Unknown terminals, Ghostty without a recognized version, and tmux/Zellij default to copying.
