@@ -803,6 +803,9 @@
             "code_mode_host": {
               "$ref": "#/definitions/FeatureToml_for_CodeModeHostConfigToml"
             },
+            "code_mode_host_grpc": {
+              "type": "boolean"
+            },
             "code_mode_interrupt": {
               "type": "boolean"
             },
@@ -1049,6 +1052,9 @@
             "omit_app_server_notification_media": {
               "type": "boolean"
             },
+            "output_token_replay": {
+              "type": "boolean"
+            },
             "personality": {
               "type": "boolean"
             },
@@ -1118,6 +1124,9 @@
             "retain_client_developer_messages": {
               "type": "boolean"
             },
+            "retain_client_tool_outputs": {
+              "type": "boolean"
+            },
             "rollout_budget": {
               "$ref": "#/definitions/FeatureToml_for_RolloutBudgetConfigToml"
             },
@@ -1176,6 +1185,9 @@
               "type": "boolean"
             },
             "step_model_switching": {
+              "type": "boolean"
+            },
+            "subagent_default_context_limits": {
               "type": "boolean"
             },
             "system_proxy_fallback": {
@@ -2950,6 +2962,10 @@
         "non_code_mode_only": {
           "type": "boolean"
         },
+        "preserve_fork_prefix": {
+          "description": "Preserve the parent's model-visible history on full forks and append child instructions. Defaults to false. Legacy compaction without a reusable context baseline still rebuilds.",
+          "type": "boolean"
+        },
         "root_agent_usage_hint_text": {
           "type": "string"
         },
@@ -3974,22 +3990,38 @@
         "alloy",
         "arbor",
         "ash",
+        "aube",
         "ballad",
         "breeze",
+        "bubbie",
         "cedar",
         "coral",
         "cove",
         "echo",
         "ember",
+        "haetsal",
+        "hanul",
+        "himari",
         "juniper",
+        "leher",
         "maple",
         "marin",
+        "miko",
+        "neer",
+        "porto",
+        "rindo",
+        "rio",
+        "rivage",
         "sage",
+        "selva",
         "shimmer",
         "sol",
+        "sonna",
         "spruce",
+        "tinta",
         "vale",
-        "verse"
+        "verse",
+        "viola"
       ],
       "type": "string"
     },
@@ -4615,6 +4647,11 @@
           ],
           "default": "auto",
           "description": "Copy selected transcript or footer text when the mouse button is released. Defaults to `auto`: enabled except in direct terminals known to forward their native copy shortcut (Ghostty 1.2+, Kitty on macOS, Windows Terminal, and VS Code on Windows). Unknown terminals, Ghostty without a recognized version, and tmux/Zellij default to copying."
+        },
+        "copy_on_select_clear_selection": {
+          "default": false,
+          "description": "Deselect transcript text after Copy on select confirms clipboard delivery. Defaults to `false` and has no effect when Copy on select is off.",
+          "type": "boolean"
         },
         "disable_paste_burst": {
           "description": "When true, disables burst-paste detection for typed input entirely. All characters are inserted as they are received, and no buffering or placeholder replacement will occur for fast keypress bursts. Overrides the legacy top-level `disable_paste_burst` setting. Defaults to `false`.",
@@ -7077,6 +7114,9 @@
         "code_mode_host": {
           "$ref": "#/definitions/FeatureToml_for_CodeModeHostConfigToml"
         },
+        "code_mode_host_grpc": {
+          "type": "boolean"
+        },
         "code_mode_interrupt": {
           "type": "boolean"
         },
@@ -7323,6 +7363,9 @@
         "omit_app_server_notification_media": {
           "type": "boolean"
         },
+        "output_token_replay": {
+          "type": "boolean"
+        },
         "personality": {
           "type": "boolean"
         },
@@ -7392,6 +7435,9 @@
         "retain_client_developer_messages": {
           "type": "boolean"
         },
+        "retain_client_tool_outputs": {
+          "type": "boolean"
+        },
         "rollout_budget": {
           "$ref": "#/definitions/FeatureToml_for_RolloutBudgetConfigToml"
         },
@@ -7450,6 +7496,9 @@
           "type": "boolean"
         },
         "step_model_switching": {
+          "type": "boolean"
+        },
+        "subagent_default_context_limits": {
           "type": "boolean"
         },
         "system_proxy_fallback": {
