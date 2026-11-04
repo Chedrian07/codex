@@ -3,6 +3,7 @@ pub(crate) mod startup;
 use crate::PromptCacheKey;
 use crate::WithTurnExtensionData;
 use crate::runtime_auth::RuntimeAuthSlot;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt::Debug;
@@ -2970,27 +2971,30 @@ impl Session {
         turn_context: &TurnContext,
         item: TurnItem,
     ) {
-        self.emit_turn_item_completed_with_token_count(
+        self.emit_turn_item_completed_with_metadata(
             turn_context,
             item,
             /*content_token_count*/ None,
+            /*user_input_extension_data*/ None,
         )
         .await;
     }
 
-    pub(crate) async fn emit_turn_item_completed_with_token_count(
+    pub(crate) async fn emit_turn_item_completed_with_metadata(
         &self,
         turn_context: &TurnContext,
         item: TurnItem,
         content_token_count: Option<u64>,
+        user_input_extension_data: Option<&BTreeMap<String, Value>>,
     ) {
         record_turn_ttfm_metric(turn_context, &item).await;
         for contributor in self.services.extensions.turn_lifecycle_contributors() {
             contributor
-                .on_item_completed(
+                .on_item_completed_with_metadata(
                     &self.services.thread_extension_data,
                     turn_context.extension_data.as_ref(),
                     &item,
+                    user_input_extension_data,
                 )
                 .await;
         }
@@ -4461,6 +4465,7 @@ impl Session {
         }
         let (executor_hook_sources, mcp, tool_router, extension_data) = prepared_tools??;
         Ok(Arc::new(StepContext {
+            sampled_through_sequence: None,
             serving_assessment: None,
             preempt: turn_context
                 .config
@@ -4773,6 +4778,7 @@ impl Session {
                         .cloned(),
                 );
             }
+            state.history.checkpoint_sampling(&mut items);
             let replacement_history = items.clone();
             state
                 .history
@@ -5807,7 +5813,13 @@ impl Session {
         user_message_item.client_id = client_id;
         let turn_item = TurnItem::UserMessage(user_message_item);
         self.emit_turn_item_started(turn_context, &turn_item).await;
-        self.emit_turn_item_completed(turn_context, turn_item).await;
+        self.emit_turn_item_completed_with_metadata(
+            turn_context,
+            turn_item,
+            /*content_token_count*/ None,
+            Some(&metadata.extension_data),
+        )
+        .await;
         self.ensure_rollout_materialized(persist_context).await;
     }
 
