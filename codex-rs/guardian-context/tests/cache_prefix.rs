@@ -21,6 +21,7 @@ use codex_history::RetainedUserMessage;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::user_input::UserInput;
+use codex_protocol_test_support::uuid_v7_item_id_generator_for_test;
 use pretty_assertions::assert_eq;
 
 struct History {
@@ -67,6 +68,7 @@ fn changing_retained_context_and_attestations_preserves_history_before_the_curre
             complete: true,
         },
         RetainedInputSource::Local(None),
+        &uuid_v7_item_id_generator_for_test(),
     );
     // Legacy review history and Felix's retained, thread-owned history use the
     // same composer. Retained assistant growth and eviction must also preserve its prefix.
@@ -98,11 +100,12 @@ fn changing_retained_context_and_attestations_preserves_history_before_the_curre
                         complete: true,
                     },
                     RetainedInputSource::Local(Some(generation + 1)),
+                    &uuid_v7_item_id_generator_for_test(),
                 );
             }
             let reviews =
                 PreviousReviews::try_from_fragments(vec![codex_guardian_context::PreviousReview {
-                    id: codex_protocol::ResponseItemId::new("review"),
+                    id: uuid_v7_item_id_generator_for_test()("review"),
                     fragment: format!("Host-attested decision {generation}: denied."),
                 }])
                 .unwrap();
@@ -115,9 +118,10 @@ fn changing_retained_context_and_attestations_preserves_history_before_the_curre
                 paths: vec![format!("/skills/skill-{generation}/SKILL.md")],
             };
             let action = PlannedAction {
-                json: format!(r#"{{"tool":"inspect","path":"file-{generation}"}}"#),
                 tool_descriptions: None,
-                kind: PlannedActionKind::Command,
+                kind: PlannedActionKind::Command {
+                    json: format!(r#"{{"tool":"inspect","path":"file-{generation}"}}"#),
+                },
                 reason: None,
             };
             let collected = default_registry()
@@ -126,6 +130,7 @@ fn changing_retained_context_and_attestations_preserves_history_before_the_curre
                     history: &history,
                     transcript: &profile.transcript,
                     root_conversation: &[],
+                    root_conversation_candidates: None,
                     trusted_user_answers: &[],
                     planned_action: Some(&action),
                     permissions: None,

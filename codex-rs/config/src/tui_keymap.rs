@@ -135,12 +135,26 @@ impl KeybindingsSpec {
 pub struct TuiGlobalKeymap {
     /// Prefix for persistent, context-aware shortcut menus.
     pub leader: Option<KeybindingsSpec>,
+    /// Change where a new conversation runs.
+    pub change_host: Option<KeybindingsSpec>,
+    /// Focus the main conversation composer.
+    pub focus_main_composer: Option<KeybindingsSpec>,
+    /// Focus the side conversation, or hide it when already focused.
+    pub focus_sidebar_content: Option<KeybindingsSpec>,
+    /// Hide the focused sidebar pane.
+    pub hide_pane: Option<KeybindingsSpec>,
+    /// Focus the parent conversation.
+    pub focus_pane_left: Option<KeybindingsSpec>,
+    /// Focus the open side conversation.
+    pub focus_pane_right: Option<KeybindingsSpec>,
     /// Open the shared agent-session overview.
     pub open_agents: Option<KeybindingsSpec>,
     /// Open the transcript overlay.
     pub open_transcript: Option<KeybindingsSpec>,
     /// Find text in the full transcript.
     pub find_transcript: Option<KeybindingsSpec>,
+    /// Enter keyboard selection mode for the transcript.
+    pub select_transcript: Option<KeybindingsSpec>,
     /// Focus activity groups in the owned transcript to inspect their details.
     pub focus_activity: Option<KeybindingsSpec>,
     /// Open the external editor for the current draft.

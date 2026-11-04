@@ -1,6 +1,8 @@
 #[cfg(test)]
 use super::*;
 use crate::GuardianAssessment;
+use crate::GuardianReviewResponse;
+use crate::GuardianReviewSessionOutcome;
 use codex_analytics::GuardianReviewFailureReason;
 use codex_protocol::protocol::GuardianAssessmentOutcome;
 use codex_protocol::protocol::GuardianRiskLevel;
@@ -46,6 +48,7 @@ fn guardian_review_retry_only_retries_recoverable_errors() {
     };
     let transient_error_info = [
         CodexErrorInfo::ServerOverloaded,
+        CodexErrorInfo::PolicyCapacityUnavailable,
         CodexErrorInfo::FlexUnavailable,
         CodexErrorInfo::HttpConnectionFailed {
             http_status_code: Some(502),
@@ -112,8 +115,15 @@ fn guardian_review_retry_only_retries_recoverable_errors() {
             false,
         ),
         (
-            GuardianReviewOutcome::Error(GuardianReviewError::parse(anyhow::anyhow!("parse"))),
+            GuardianReviewSessionOutcome::Completed(Ok(Some(GuardianReviewResponse::new(
+                "invalid assessment".to_owned(),
+            ))))
+            .into(),
             true,
+        ),
+        (
+            GuardianReviewSessionOutcome::Completed(Ok(None)).into(),
+            false,
         ),
         (
             GuardianReviewOutcome::Error(GuardianReviewError::Timeout),

@@ -442,6 +442,10 @@
           "description": "Experimental replacement for the history-retrieval instructions when history tools and Apps are enabled. Omitted or blank values use the built-in prompt.",
           "type": "string"
         },
+        "experimental_denial_reconsideration_prompt": {
+          "description": "Developer message used when `features.guardian_denial_reconsideration` is enabled. Omitted or blank values use the built-in prompt. Maximum 1,000 UTF-8 bytes.",
+          "type": "string"
+        },
         "experimental_policy_template": {
           "description": "Experimental full Guardian prompt template containing the tenant policy placeholder.",
           "type": "string"
@@ -563,6 +567,50 @@
         "region",
         "secret_access_key",
         "service"
+      ],
+      "type": "object"
+    },
+    "BodySecretReplacement": {
+      "additionalProperties": false,
+      "properties": {
+        "placeholder": {
+          "type": "string"
+        },
+        "secret": {
+          "$ref": "#/definitions/ProxySecretSource"
+        }
+      },
+      "required": [
+        "placeholder",
+        "secret"
+      ],
+      "type": "object"
+    },
+    "BodySecretSubstitutionConfig": {
+      "additionalProperties": false,
+      "description": "Exact opaque placeholders scoped by their enclosing host/method/path MITM hook.",
+      "properties": {
+        "max_body_bytes": {
+          "default": 8388608,
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "port": {
+          "default": 443,
+          "format": "uint16",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "replacements": {
+          "items": {
+            "$ref": "#/definitions/BodySecretReplacement"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "replacements"
       ],
       "type": "object"
     },
@@ -795,6 +843,9 @@
             "agent_message_board": {
               "type": "boolean"
             },
+            "agent_message_board_mcp": {
+              "type": "boolean"
+            },
             "analytics_plan_history": {
               "type": "boolean"
             },
@@ -817,6 +868,9 @@
               "type": "boolean"
             },
             "apps": {
+              "type": "boolean"
+            },
+            "apps_early_resource_discovery": {
               "type": "boolean"
             },
             "apps_mcp_path_override": {
@@ -868,6 +922,9 @@
             "cli_daybreak": {
               "type": "boolean"
             },
+            "cli_resume_account_check": {
+              "type": "boolean"
+            },
             "code_mode": {
               "$ref": "#/definitions/FeatureToml_for_CodeModeConfigToml"
             },
@@ -878,6 +935,9 @@
               "$ref": "#/definitions/FeatureToml_for_CodeModeHostConfigToml"
             },
             "code_mode_host_grpc": {
+              "type": "boolean"
+            },
+            "code_mode_host_output_truncation": {
               "type": "boolean"
             },
             "code_mode_interrupt": {
@@ -932,6 +992,9 @@
               "$ref": "#/definitions/FeatureToml_for_ContextManagementConfigToml"
             },
             "credential_masking": {
+              "type": "boolean"
+            },
+            "critical_path_timing": {
               "type": "boolean"
             },
             "current_time_reminder": {
@@ -997,6 +1060,9 @@
             "fast_mode": {
               "type": "boolean"
             },
+            "gcp_setup_wizard": {
+              "type": "boolean"
+            },
             "goals": {
               "type": "boolean"
             },
@@ -1006,10 +1072,19 @@
             "guardian_conversation_history_tools": {
               "type": "boolean"
             },
+            "guardian_denial_reconsideration": {
+              "type": "boolean"
+            },
             "guardian_enhanced_node_repl_transcripts": {
               "type": "boolean"
             },
             "guardian_ext": {
+              "type": "boolean"
+            },
+            "guardian_include_additional_context": {
+              "type": "boolean"
+            },
+            "guardian_native_multi_agent_history": {
               "type": "boolean"
             },
             "guardian_node_repl_transcript_images": {
@@ -1039,10 +1114,16 @@
             "hooks": {
               "type": "boolean"
             },
+            "hosted_search_policy": {
+              "type": "boolean"
+            },
             "image_detail_original": {
               "type": "boolean"
             },
             "image_generation": {
+              "type": "boolean"
+            },
+            "image_generation_animation": {
               "type": "boolean"
             },
             "image_resize_notice": {
@@ -1069,10 +1150,16 @@
             "in_app_voice": {
               "type": "boolean"
             },
+            "incremental_exec_tools": {
+              "type": "boolean"
+            },
             "incremental_tools": {
               "type": "boolean"
             },
             "instant_interrupt": {
+              "type": "boolean"
+            },
+            "interrupt_on_cancel": {
               "type": "boolean"
             },
             "item_ids": {
@@ -1094,6 +1181,9 @@
               "type": "boolean"
             },
             "mcp_2026_07_28": {
+              "type": "boolean"
+            },
+            "mcp_connection_sharing": {
               "type": "boolean"
             },
             "mcp_oauth_refresh_coordination": {
@@ -1141,10 +1231,16 @@
             "omit_app_server_notification_media": {
               "type": "boolean"
             },
+            "omit_skill_descriptions": {
+              "type": "boolean"
+            },
             "output_token_replay": {
               "type": "boolean"
             },
             "personality": {
+              "type": "boolean"
+            },
+            "plugin_discovery_prefetch": {
               "type": "boolean"
             },
             "plugin_hooks": {
@@ -1157,6 +1253,9 @@
               "type": "boolean"
             },
             "powershell_shell_version": {
+              "type": "boolean"
+            },
+            "prediction_preserve_parent_tools": {
               "type": "boolean"
             },
             "prefer_mxc": {
@@ -1249,6 +1348,12 @@
             "shell_zsh_fork": {
               "type": "boolean"
             },
+            "simplified_selection_hints": {
+              "type": "boolean"
+            },
+            "skill_catalog_deltas": {
+              "type": "boolean"
+            },
             "skill_env_var_dependency_prompt": {
               "type": "boolean"
             },
@@ -1283,6 +1388,9 @@
               "type": "boolean"
             },
             "subagent_thread_environments": {
+              "type": "boolean"
+            },
+            "suppress_model_change_announcements": {
               "type": "boolean"
             },
             "system_proxy_fallback": {
@@ -1321,7 +1429,13 @@
             "tui_app_server": {
               "type": "boolean"
             },
+            "tui_extensions_statusline": {
+              "type": "boolean"
+            },
             "tui_multi_backend": {
+              "type": "boolean"
+            },
+            "tui_workspace": {
               "type": "boolean"
             },
             "ultrafast_mode": {
@@ -1346,6 +1460,9 @@
               "type": "boolean"
             },
             "unified_image_budget": {
+              "type": "boolean"
+            },
+            "untrusted_as_tool_output": {
               "type": "boolean"
             },
             "use_agent_identity": {
@@ -1905,8 +2022,26 @@
         "client_id": {
           "type": "string"
         },
+        "credentials_store": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/OAuthCredentialsStore"
+            }
+          ],
+          "description": "Where Codex stores this gateway's OAuth credentials. Defaults to the keyring-backed store."
+        },
         "delivery": {
-          "$ref": "#/definitions/GatewayOAuthDelivery"
+          "allOf": [
+            {
+              "$ref": "#/definitions/GatewayOAuthDelivery"
+            }
+          ],
+          "default": {
+            "kind": "header",
+            "name": "Authorization",
+            "scheme": "Bearer"
+          },
+          "description": "Omit to send the gateway token via the Authorization header"
         },
         "redirect_port": {
           "format": "uint16",
@@ -1930,7 +2065,6 @@
       "required": [
         "authorization_url",
         "client_id",
-        "delivery",
         "token_url"
       ],
       "type": "object"
@@ -2029,7 +2163,7 @@
           "type": "boolean"
         },
         "sandbox_approval": {
-          "description": "Whether to allow shell command approval requests, including inline `with_additional_permissions` and `require_escalated` requests.",
+          "description": "Whether to allow sandbox escalation approval requests, including inline `with_additional_permissions` and `require_escalated` requests. Dangerous commands can still request approval within existing permissions.",
           "type": "boolean"
         },
         "skill_approval": {
@@ -2760,6 +2894,10 @@
           "description": "Model used for memory consolidation.",
           "type": "string"
         },
+        "consolidation_service_tier": {
+          "description": "Service tier for memory consolidation. Defaults to Standard (`\"default\"`).",
+          "type": "string"
+        },
         "dedicated_tools": {
           "description": "When `true`, expose dedicated memory tools through the extension tool surface.",
           "type": "boolean"
@@ -2943,6 +3081,10 @@
       "additionalProperties": false,
       "description": "Overrides for the optional API features supported by a custom provider.",
       "properties": {
+        "cyber_access_programs": {
+          "description": "Whether the provider accepts explicit `access_programs.cyber` selections. Defaults to enabled for the built-in OpenAI provider and disabled otherwise. This does not grant program access or change authentication.",
+          "type": "boolean"
+        },
         "external_web_access": {
           "description": "Whether hosted web search may access the live web.",
           "type": "boolean"
@@ -2990,6 +3132,10 @@
           ],
           "description": "Optional API capability overrides for a custom Responses-compatible provider. Unspecified capabilities retain their existing provider defaults."
         },
+        "credential_file": {
+          "description": "Absolute path to a Google ADC credential file. For GCP, overrides GOOGLE_APPLICATION_CREDENTIALS in the auth command's environment only.",
+          "type": "string"
+        },
         "env_http_headers": {
           "additionalProperties": {
             "type": "string"
@@ -3029,7 +3175,7 @@
           "type": "string"
         },
         "model_catalog_url": {
-          "description": "Optional full URL for a Codex-native model catalog. When unset, OpenAI discovery uses the Codex backend unless `base_url` overrides the inference endpoint.",
+          "description": "Optional full URL for a Codex-native model catalog. When unset, OpenAI discovery uses the Codex backend unless `base_url` overrides the inference endpoint. The endpoint must serve the Codex catalog format, not the public `/v1/models` API.\n\nFor built-in OpenAI, set this under `[model_providers.openai]`; other non-default provider overrides are rejected. The URL must use HTTPS and an allowed ChatGPT host. Other hosts require a custom provider. Inference still uses `openai_base_url`.\n\nCatalog requests use the provider's credentials, including an API key or ChatGPT access token. Only configure an endpoint you trust with those credentials. Setting this URL does not grant catalog access or guarantee that the endpoint accepts a regional API key. Existing discovery gates and entitlement checks apply.",
           "type": "string"
         },
         "name": {
@@ -3212,6 +3358,14 @@
           "allOf": [
             {
               "$ref": "#/definitions/AwsSigV4Config"
+            }
+          ],
+          "default": null
+        },
+        "body_secret_substitution": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/BodySecretSubstitutionConfig"
             }
           ],
           "default": null
@@ -3590,6 +3744,7 @@
       "enum": [
         "auto",
         "osc9",
+        "osc777",
         "bel"
       ],
       "type": "string"
@@ -3604,6 +3759,24 @@
             "type": "string"
           },
           "type": "array"
+        }
+      ]
+    },
+    "OAuthCredentialsStore": {
+      "oneOf": [
+        {
+          "description": "Encrypt credentials using a passphrase kept in the OS keyring.",
+          "enum": [
+            "keyring"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Store credentials in plaintext in `$CODEX_HOME/secrets/gateway_oauth.json`.",
+          "enum": [
+            "file"
+          ],
+          "type": "string"
         }
       ]
     },
@@ -3675,6 +3848,10 @@
           "description": "Opt in to logging completed Guardian assessments to an OTLP log exporter. Defaults to false. Rationales can be sensitive and are capped at 64 KiB.",
           "type": "boolean"
         },
+        "log_sse_deltas": {
+          "description": "Log successful SSE events whose kind ends in `.delta`. Defaults to true. Disabling this preserves errors, completion events, and metrics.",
+          "type": "boolean"
+        },
         "log_user_prompt": {
           "description": "Log user prompt in traces",
           "type": "boolean"
@@ -3700,9 +3877,6 @@
               "$ref": "#/definitions/ToolResultLogConfig"
             }
           ],
-          "default": {
-            "max_bytes": 2048
-          },
           "description": "Byte limit for tool-result log output; independent of model-visible output."
         },
         "trace_exporter": {
@@ -3883,6 +4057,13 @@
     "PluginConfig": {
       "additionalProperties": false,
       "properties": {
+        "apps": {
+          "additionalProperties": {
+            "$ref": "#/definitions/AppConfig"
+          },
+          "description": "Connector-wide app settings keyed by connector ID. Ignored when this plugin is disabled by configuration. Explicit top-level app fields win.",
+          "type": "object"
+        },
         "auto_provision": {
           "description": "Provisioning metadata. Omission does not request provisioning. Only applies with `remote_plugin_id` and Plugin Service availability to the requesting user at provisioning time. Effective enablement, trusted provisioning policy, and authentication and authorization restrictions still apply. This value is not trusted authorization and does not trigger provisioning.",
           "type": "boolean"
@@ -4443,6 +4624,10 @@
         "enabled": {
           "type": "boolean"
         },
+        "enforce_limit": {
+          "description": "Stop when the shared budget is exhausted. Defaults to true.",
+          "type": "boolean"
+        },
         "limit_tokens": {
           "format": "int64",
           "minimum": 1.0,
@@ -4888,6 +5073,14 @@
     "ToolsToml": {
       "additionalProperties": false,
       "properties": {
+        "client_search_provider": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/WebSearchProvider"
+            }
+          ],
+          "description": "Client provider preference when the model does not select a provider."
+        },
         "experimental_request_user_input": {
           "$ref": "#/definitions/ExperimentalRequestUserInput"
         },
@@ -4977,6 +5170,17 @@
           "default": false,
           "description": "Deselect read-only transcript or footer text after Copy on select confirms delivery. Editable composer selections remain visible. Defaults to `false` and has no effect when Copy on select is off.",
           "type": "boolean"
+        },
+        "default_hosts": {
+          "additionalProperties": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "default": {},
+          "description": "Preferred hosts for new conversations, indexed by project and local user identity. Read from the user configuration only; values are never endpoints or credentials.",
+          "type": "object"
         },
         "disable_paste_burst": {
           "description": "When true, disables burst-paste detection for typed input entirely. All characters are inserted as they are received, and no buffering or placeholder replacement will occur for fast keypress bursts. Overrides the legacy top-level `disable_paste_burst` setting. Defaults to `false`.",
@@ -5074,15 +5278,22 @@
               "yank": null
             },
             "global": {
+              "change_host": null,
               "clear_terminal": null,
               "copy": null,
               "find_transcript": null,
               "focus_activity": null,
+              "focus_main_composer": null,
+              "focus_pane_left": null,
+              "focus_pane_right": null,
+              "focus_sidebar_content": null,
+              "hide_pane": null,
               "leader": null,
               "open_agents": null,
               "open_external_editor": null,
               "open_transcript": null,
               "queue": null,
+              "select_transcript": null,
               "submit": null,
               "toggle_fast_mode": null,
               "toggle_raw_output": null,
@@ -5866,6 +6077,14 @@
       "additionalProperties": false,
       "description": "Global keybindings. These are used when a context does not define an override.",
       "properties": {
+        "change_host": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Change where a new conversation runs."
+        },
         "clear_terminal": {
           "allOf": [
             {
@@ -5897,6 +6116,46 @@
             }
           ],
           "description": "Focus activity groups in the owned transcript to inspect their details."
+        },
+        "focus_main_composer": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Focus the main conversation composer."
+        },
+        "focus_pane_left": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Focus the parent conversation."
+        },
+        "focus_pane_right": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Focus the open side conversation."
+        },
+        "focus_sidebar_content": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Focus the side conversation, or hide it when already focused."
+        },
+        "hide_pane": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Hide the focused sidebar pane."
         },
         "leader": {
           "allOf": [
@@ -5937,6 +6196,14 @@
             }
           ],
           "description": "Queue the current composer draft while a task is running."
+        },
+        "select_transcript": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Enter keyboard selection mode for the transcript."
         },
         "submit": {
           "allOf": [
@@ -6098,15 +6365,22 @@
             }
           ],
           "default": {
+            "change_host": null,
             "clear_terminal": null,
             "copy": null,
             "find_transcript": null,
             "focus_activity": null,
+            "focus_main_composer": null,
+            "focus_pane_left": null,
+            "focus_pane_right": null,
+            "focus_sidebar_content": null,
+            "hide_pane": null,
             "leader": null,
             "open_agents": null,
             "open_external_editor": null,
             "open_transcript": null,
             "queue": null,
+            "select_transcript": null,
             "submit": null,
             "toggle_fast_mode": null,
             "toggle_raw_output": null,
@@ -7143,6 +7417,14 @@
       ],
       "type": "string"
     },
+    "WebSearchProvider": {
+      "description": "Provider preference selected by the resolved model catalog entry.",
+      "enum": [
+        "standalone",
+        "search_mcp"
+      ],
+      "type": "string"
+    },
     "WebSearchToolConfig": {
       "additionalProperties": false,
       "properties": {
@@ -7381,6 +7663,9 @@
         "agent_message_board": {
           "type": "boolean"
         },
+        "agent_message_board_mcp": {
+          "type": "boolean"
+        },
         "analytics_plan_history": {
           "type": "boolean"
         },
@@ -7403,6 +7688,9 @@
           "type": "boolean"
         },
         "apps": {
+          "type": "boolean"
+        },
+        "apps_early_resource_discovery": {
           "type": "boolean"
         },
         "apps_mcp_path_override": {
@@ -7454,6 +7742,9 @@
         "cli_daybreak": {
           "type": "boolean"
         },
+        "cli_resume_account_check": {
+          "type": "boolean"
+        },
         "code_mode": {
           "$ref": "#/definitions/FeatureToml_for_CodeModeConfigToml"
         },
@@ -7464,6 +7755,9 @@
           "$ref": "#/definitions/FeatureToml_for_CodeModeHostConfigToml"
         },
         "code_mode_host_grpc": {
+          "type": "boolean"
+        },
+        "code_mode_host_output_truncation": {
           "type": "boolean"
         },
         "code_mode_interrupt": {
@@ -7518,6 +7812,9 @@
           "$ref": "#/definitions/FeatureToml_for_ContextManagementConfigToml"
         },
         "credential_masking": {
+          "type": "boolean"
+        },
+        "critical_path_timing": {
           "type": "boolean"
         },
         "current_time_reminder": {
@@ -7583,6 +7880,9 @@
         "fast_mode": {
           "type": "boolean"
         },
+        "gcp_setup_wizard": {
+          "type": "boolean"
+        },
         "goals": {
           "type": "boolean"
         },
@@ -7592,10 +7892,19 @@
         "guardian_conversation_history_tools": {
           "type": "boolean"
         },
+        "guardian_denial_reconsideration": {
+          "type": "boolean"
+        },
         "guardian_enhanced_node_repl_transcripts": {
           "type": "boolean"
         },
         "guardian_ext": {
+          "type": "boolean"
+        },
+        "guardian_include_additional_context": {
+          "type": "boolean"
+        },
+        "guardian_native_multi_agent_history": {
           "type": "boolean"
         },
         "guardian_node_repl_transcript_images": {
@@ -7625,10 +7934,16 @@
         "hooks": {
           "type": "boolean"
         },
+        "hosted_search_policy": {
+          "type": "boolean"
+        },
         "image_detail_original": {
           "type": "boolean"
         },
         "image_generation": {
+          "type": "boolean"
+        },
+        "image_generation_animation": {
           "type": "boolean"
         },
         "image_resize_notice": {
@@ -7655,10 +7970,16 @@
         "in_app_voice": {
           "type": "boolean"
         },
+        "incremental_exec_tools": {
+          "type": "boolean"
+        },
         "incremental_tools": {
           "type": "boolean"
         },
         "instant_interrupt": {
+          "type": "boolean"
+        },
+        "interrupt_on_cancel": {
           "type": "boolean"
         },
         "item_ids": {
@@ -7680,6 +8001,9 @@
           "type": "boolean"
         },
         "mcp_2026_07_28": {
+          "type": "boolean"
+        },
+        "mcp_connection_sharing": {
           "type": "boolean"
         },
         "mcp_oauth_refresh_coordination": {
@@ -7727,10 +8051,16 @@
         "omit_app_server_notification_media": {
           "type": "boolean"
         },
+        "omit_skill_descriptions": {
+          "type": "boolean"
+        },
         "output_token_replay": {
           "type": "boolean"
         },
         "personality": {
+          "type": "boolean"
+        },
+        "plugin_discovery_prefetch": {
           "type": "boolean"
         },
         "plugin_hooks": {
@@ -7743,6 +8073,9 @@
           "type": "boolean"
         },
         "powershell_shell_version": {
+          "type": "boolean"
+        },
+        "prediction_preserve_parent_tools": {
           "type": "boolean"
         },
         "prefer_mxc": {
@@ -7835,6 +8168,12 @@
         "shell_zsh_fork": {
           "type": "boolean"
         },
+        "simplified_selection_hints": {
+          "type": "boolean"
+        },
+        "skill_catalog_deltas": {
+          "type": "boolean"
+        },
         "skill_env_var_dependency_prompt": {
           "type": "boolean"
         },
@@ -7869,6 +8208,9 @@
           "type": "boolean"
         },
         "subagent_thread_environments": {
+          "type": "boolean"
+        },
+        "suppress_model_change_announcements": {
           "type": "boolean"
         },
         "system_proxy_fallback": {
@@ -7907,7 +8249,13 @@
         "tui_app_server": {
           "type": "boolean"
         },
+        "tui_extensions_statusline": {
+          "type": "boolean"
+        },
         "tui_multi_backend": {
+          "type": "boolean"
+        },
+        "tui_workspace": {
           "type": "boolean"
         },
         "ultrafast_mode": {
@@ -7932,6 +8280,9 @@
           "type": "boolean"
         },
         "unified_image_budget": {
+          "type": "boolean"
+        },
+        "untrusted_as_tool_output": {
           "type": "boolean"
         },
         "use_agent_identity": {
@@ -8407,7 +8758,7 @@
       "type": "boolean"
     },
     "thread_unload_delay_secs": {
-      "description": "Seconds a thread must have no subscribers and no activity before app-server unloads it. Defaults to 1800 (30 minutes); zero unloads immediately. Resolved when each thread is loaded; request config overrides apply per thread.",
+      "description": "Seconds a thread must have no subscribers and no activity before app-server unloads it. Defaults to 60 (1 minute); zero unloads immediately. Resolved when each thread is loaded; request config overrides apply per thread.",
       "format": "uint64",
       "minimum": 0.0,
       "type": "integer"

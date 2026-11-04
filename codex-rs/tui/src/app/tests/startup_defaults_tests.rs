@@ -29,6 +29,14 @@ pub(super) async fn run_startup_for_test(
         initial_backends,
         config.clone(),
         config.cwd.to_path_buf(),
+        backend_selection::BackendPreferenceContext::new(
+            &config,
+            crate::backend_preference_local_cwd(
+                config.cwd.as_path(),
+                &app_server_target,
+                &EnvironmentManager::default_for_tests(),
+            ),
+        ),
         Vec::new(),
         ConfigOverrides::default(),
         LoaderOverrides::default(),
@@ -509,8 +517,20 @@ requires_openai_auth = false
                 serde_json::json!({"cwd": server_config.cwd.display().to_string(), "includeLayers": true})
             ],
         );
-        if choice == "saved" {
-            assert_eq!(started.session.approvals_reviewer, ApprovalsReviewer::User);
+        if matches!(choice, "saved" | "embedded_saved") {
+            let expected_turn_policy = if choice == "saved" {
+                AskForApproval::OnRequest
+            } else {
+                AskForApproval::Never
+            };
+            assert_eq!(
+                started.session.approvals_reviewer,
+                if choice == "saved" {
+                    ApprovalsReviewer::User
+                } else {
+                    ApprovalsReviewer::AutoReview
+                }
+            );
             let (mut app, _events, mut ops) = make_test_app_with_channels().await;
             app.app_server_target = target;
             app.config.permissions.approval_policy =
@@ -522,7 +542,7 @@ requires_openai_auth = false
                 .await?;
             assert_eq!(
                 app.config.permissions.approval_policy.value(),
-                AskForApproval::OnRequest.to_core()
+                expected_turn_policy.to_core()
             );
             app.chat_widget.insert_str("first turn");
             app.chat_widget
@@ -530,8 +550,11 @@ requires_openai_auth = false
             app.submit_thread_op(&mut server, thread_id, next_user_turn_op(&mut ops))
                 .await?;
             let turn = &recorded_params(&requests, "turn/start")[0];
-            assert_eq!(turn["approvalsReviewer"], "user");
-            assert_eq!(turn["approvalPolicy"], "on-request");
+            assert!(turn["approvalsReviewer"].is_null());
+            assert_eq!(
+                turn["approvalPolicy"],
+                serde_json::json!(expected_turn_policy)
+            );
         }
         server.shutdown().await?;
         proxy.await??;
@@ -676,6 +699,66 @@ async fn fresh_startup_reads_destination_and_cleared_model_uses_catalog() -> Res
         server.shutdown().await?;
         proxy.await??;
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn fresh_startup_observes_config_edits_after_directory_trust() -> Result<()> {
+    let home = tempdir()?;
+    let destination = tempdir()?;
+    std::fs::create_dir(destination.path().join(".git"))?;
+    let config_path = home.path().join("config.toml");
+    let project = serde_json::to_string(&destination.path().display().to_string())?;
+    let write_tier = |tier: &str| {
+        std::fs::write(
+            &config_path,
+            format!("service_tier = \"{tier}\"\n[projects.{project}]\ntrust_level = \"trusted\"\n"),
+        )
+    };
+    write_tier("priority")?;
+    let config = ConfigBuilder::default()
+        .codex_home(home.path().to_path_buf())
+        .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
+        .harness_overrides(ConfigOverrides {
+            cwd: Some(destination.path().to_path_buf()),
+            ..Default::default()
+        })
+        .build()
+        .await?;
+    let (mut server, requests, proxy) = start_recording_app_server_with_history(
+        &config,
+        HistoryCapabilities::Current,
+        /*blocked_thread_list*/ None,
+        /*failed_thread_name*/ None,
+        crate::app_server_session::ThreadParamsMode::Embedded,
+        LoaderOverrides {
+            user_config_path: Some(config_path.clone().abs()),
+            ..LoaderOverrides::default()
+        },
+    )
+    .await?;
+    let bootstrap = server.bootstrap(&config).await?;
+    let reads_before = recorded_params(&requests, "config/read").len();
+    let trust = crate::config_update::read_remote_project_trust(
+        server.request_handle(),
+        config.cwd.as_path(),
+        crate::config_update::ProjectTrustHost::Local,
+    )
+    .await?;
+    assert_eq!(trust, None);
+    // A different process can edit this file even when the app server is embedded.
+    write_tier("flex")?;
+    run_until_thread_start(server, config, bootstrap, &requests).await?;
+    let starts = recorded_params(&requests, "thread/start");
+    assert_eq!(
+        (
+            starts.len(),
+            &starts[0]["serviceTier"],
+            recorded_params(&requests, "config/read").len() - reads_before,
+        ),
+        (1, &serde_json::json!("flex"), 2),
+    );
+    proxy.abort();
     Ok(())
 }
 

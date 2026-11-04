@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use codex_api::AuthProvider;
 use codex_api::SharedAuthProvider;
+use codex_http_client::CHATGPT_ACCOUNT_ID_HEADER;
 use codex_http_client::ClientRouteClass;
 use codex_http_client::HttpClientFactory;
 use codex_http_client::HttpResponse;
@@ -179,16 +180,12 @@ impl EnvironmentRegistryClient {
             security_profile: NOISE_RELAY_SECURITY_PROFILE.to_string(),
             executor_public_key: executor_public_key.clone(),
         };
-        let (response, executor_credential) = timeout_at(
-            deadline,
-            self.send_authenticated(Request::new(Method::POST, url).with_json(&body)),
-        )
-        .await
-        .unwrap_or_else(|_| {
-            Err(ExecServerError::EnvironmentRegistryRequest(
-                codex_http_client::RouteAwareRequestError::Timeout,
-            ))
-        })?;
+        let (response, executor_credential) = self
+            .send_authenticated(
+                Request::new(Method::POST, url).with_json(&body),
+                Some(deadline),
+            )
+            .await?;
         let status = response.status();
         // Read diagnostics within the same attempt budget, preserving a known error status.
         let response: EnvironmentRegistryRegistrationResponse = timeout_at(deadline, async {
@@ -263,7 +260,10 @@ impl EnvironmentRegistryClient {
         let response: EnvironmentRegistryConnectResponse =
             timeout_at(tokio::time::Instant::now() + self.connect_timeout, async {
                 let (response, _) = self
-                    .send_authenticated(Request::new(Method::POST, url).with_json(&body))
+                    .send_authenticated(
+                        Request::new(Method::POST, url).with_json(&body),
+                        /*deadline*/ None,
+                    )
                     .await?;
                 self.parse_json_response(response).await
             })
@@ -304,13 +304,9 @@ impl EnvironmentRegistryClient {
     async fn resolve_auth(&self) -> Result<(HeaderMap, Option<HeaderValue>), ExecServerError> {
         let mut headers = self
             .auth_provider
-            .resolve_auth_headers()
+            .apply_auth_headers(HeaderMap::new())
             .await
-            .map_err(|error| {
-                ExecServerError::EnvironmentRegistryAuth(format!(
-                    "failed to resolve environment registry authentication: {error}"
-                ))
-            })?;
+            .map_err(auth::registry_auth_error)?;
         let executor_credential = if self.auth_mode == RegistryAuthMode::ExecutorCredential {
             // Scoped mode sends exactly one bearer and never accompanying account credentials.
             let token = (headers.len() == 1)
@@ -424,7 +420,10 @@ impl HarnessKeyValidator for RegistryHarnessKeyValidator {
                 })?,
             );
         }
-        let (response, executor_credential) = self.client.send_authenticated(request).await?;
+        let (response, executor_credential) = self
+            .client
+            .send_authenticated(request, /*deadline*/ None)
+            .await?;
         let status = response.status();
         if !status.is_success() {
             // The request contains the short-lived authorization. Do not include
@@ -560,12 +559,44 @@ impl AuthProvider for StaticBearerAuthProvider {
         headers.insert(http::header::AUTHORIZATION, self.authorization.clone());
         if let Some(chatgpt_account_id) = &self.chatgpt_account_id {
             headers.insert(
-                HeaderName::from_static("chatgpt-account-id"),
+                HeaderName::from_static(CHATGPT_ACCOUNT_ID_HEADER),
                 chatgpt_account_id.clone(),
             );
         }
         Ok(())
     }
+}
+
+/// Read a single newline-terminated registration bearer from a parent-owned pipe.
+pub fn registration_auth_from_stdin() -> std::io::Result<SharedAuthProvider> {
+    use std::io::BufRead;
+    use std::io::Read;
+
+    // Deny same-user access to the pipe and credential memory before reading.
+    #[cfg(target_os = "linux")]
+    rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable)?;
+
+    let mut token = String::new();
+    std::io::stdin()
+        .lock()
+        .take(16 * 1024)
+        .read_line(&mut token)?;
+    if token.pop() != Some('\n') {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "expected a newline-terminated registration bearer of at most 16 KiB",
+        ));
+    }
+    if token.ends_with('\r') {
+        token.pop();
+    }
+    if token.is_empty() || !token.bytes().all(|byte| byte.is_ascii_graphic()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid registration bearer",
+        ));
+    }
+    static_bearer_auth_provider(token, /*chatgpt_account_id*/ None).map_err(std::io::Error::other)
 }
 
 fn static_bearer_auth_provider(
@@ -1131,9 +1162,8 @@ mod tests {
             Ok(())
         }
 
-        fn resolve_auth_headers(&self) -> codex_api::AuthHeadersFuture<'_> {
-            Box::pin(async {
-                let mut headers = HeaderMap::new();
+        fn apply_auth_headers(&self, mut headers: HeaderMap) -> codex_api::AuthHeadersFuture<'_> {
+            Box::pin(async move {
                 let _ = headers.insert(
                     http::header::AUTHORIZATION,
                     HeaderValue::from_static("Bearer registry-token"),
