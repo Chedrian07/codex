@@ -79,7 +79,9 @@ use codex_utils_output_truncation::approx_token_count;
 use codex_utils_output_truncation::approx_tokens_from_byte_count_i64;
 use codex_utils_output_truncation::truncate_function_output_payload;
 use codex_utils_output_truncation::with_serialization_allowance;
+use image::ImageReader;
 use std::collections::BTreeSet;
+use std::io::Cursor;
 use std::num::NonZeroUsize;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -554,17 +556,6 @@ impl ContextManager {
 
     pub(crate) fn reference_context_item(&self) -> Option<TurnContextItem> {
         self.reference_context_item.clone()
-    }
-
-    pub(crate) fn update_world_state(
-        &mut self,
-        world_state: &WorldState,
-    ) -> (Vec<WorldStateUpdate>, Option<WorldStateItem>) {
-        let (snapshot, fragments) =
-            world_state.render_history_diff(self.world_state_baseline.as_ref(), self.raw_items());
-        let rollout_item = self.world_state_item(&snapshot);
-        self.world_state_baseline = Some(snapshot);
-        (fragments, rollout_item)
     }
 
     pub(crate) fn render_step_world_state(
@@ -1099,8 +1090,8 @@ impl ContextManager {
         self.set_token_info_with_boundary(Some(info), covered_item_count);
     }
 
-    /// Restored or rewritten history keeps the existing last-model-output approximation.
-    fn reset_last_usage_boundary(&mut self) {
+    /// Align the context count after history changes or buffered model output is committed.
+    pub(crate) fn reset_last_usage_boundary(&mut self) {
         self.last_model_output_item_count = self
             .items
             .iter()
@@ -1518,15 +1509,18 @@ fn estimate_original_image_bytes(image_url: &str) -> Option<i64> {
                 return None;
             }
         };
-        let dynamic = match image::load_from_memory(&bytes) {
-            Ok(dynamic) => dynamic,
+        let dimensions = image::guess_format(&bytes).and_then(|format| {
+            ImageReader::with_format(Cursor::new(bytes.as_slice()), format).into_dimensions()
+        });
+        let (width, height) = match dimensions {
+            Ok(dimensions) => dimensions,
             Err(error) => {
-                tracing::trace!("failed to decode original-detail image bytes: {error}");
+                tracing::trace!("failed to read original-detail image dimensions: {error}");
                 return None;
             }
         };
-        let width = i64::from(dynamic.width());
-        let height = i64::from(dynamic.height());
+        let width = i64::from(width);
+        let height = i64::from(height);
         let patch_size = i64::from(ORIGINAL_IMAGE_PATCH_SIZE);
         let patches_wide = width.saturating_add(patch_size.saturating_sub(1)) / patch_size;
         let patches_high = height.saturating_add(patch_size.saturating_sub(1)) / patch_size;

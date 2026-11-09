@@ -41,7 +41,6 @@ use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::ENVIRONMENTS_INSTRUCTIONS_OPEN_TAG;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::PLUGINS_INSTRUCTIONS_OPEN_TAG;
-use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::TurnContextItem;
 use codex_protocol_test_support::ContentItemTestExt;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -178,6 +177,17 @@ fn raw_items(history: &ContextManager) -> Vec<ResponseItem> {
 
 fn estimate_response_item_model_visible_bytes(item: &ResponseItem) -> i64 {
     super::estimate_response_item_model_visible_bytes(item, &FileAudioDurations::default())
+}
+
+impl ContextManager {
+    fn update_world_state(
+        &mut self,
+        world_state: &WorldState,
+    ) -> (Vec<WorldStateUpdate>, Option<WorldStateItem>) {
+        let (snapshot, updates, item) = self.render_step_world_state(world_state);
+        self.set_world_state_baseline(snapshot);
+        (updates, item)
+    }
 }
 
 #[test]
@@ -765,6 +775,7 @@ fn world_state_reconciles_matching_legacy_history_once() {
             .into_iter()
             .map(|update| match update.content {
                 WorldStateUpdateContent::Fragment(fragment) => fragment.body().expect_text(),
+                WorldStateUpdateContent::Environment(_) => panic!("unexpected environment"),
                 WorldStateUpdateContent::Item(item) =>
                     panic!("expected a text fragment, got {item:?}"),
             })
@@ -845,6 +856,7 @@ fn reference_context_item() -> TurnContextItem {
     TurnContextItem {
         turn_id: Some("reference-turn".to_string()),
         root_turn_id: None,
+        direct_only_tool_namespaces: None,
         disabled_plugin_ids: None,
         cwd: AbsolutePathBuf::try_from(
             std::env::current_dir()
@@ -854,10 +866,8 @@ fn reference_context_item() -> TurnContextItem {
         .expect("absolute reference cwd"),
         approval_policy: AskForApproval::OnRequest,
         approvals_reviewer: None,
-        sandbox_policy: SandboxPolicy::new_read_only_policy(),
-        permission_profile: None,
+        permission_profile: codex_protocol::models::PermissionProfile::read_only(),
         active_permission_profile: None,
-        file_system_sandbox_policy: None,
         model: "gpt-test".to_string(),
         comp_hash: None,
         collaboration_mode: None,

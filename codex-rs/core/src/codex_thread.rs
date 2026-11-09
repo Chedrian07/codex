@@ -41,6 +41,7 @@ use codex_protocol::models::ActivePermissionProfile;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::ProfileWorkspaceRoot;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EnvironmentConfig;
@@ -87,6 +88,7 @@ use tokio::sync::RwLock;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 use codex_rollout::state_db::StateDbHandle;
 
@@ -241,6 +243,12 @@ impl CodexThread {
             out_of_band_elicitations: Mutex::new(OutOfBandElicitations::default()),
             _diagnostics_guard: LIVE_THREADS.track(),
         }
+    }
+
+    /// Identifies this loaded agent tree, shared by its root and native children.
+    /// Loading a new tree gives it a new ID, even when reusing a persisted thread ID.
+    pub fn agent_tree_id(&self) -> Uuid {
+        self.session.services.local_agent_runtime.tree_id()
     }
 
     pub async fn submit(&self, op: Op) -> CodexResult<String> {
@@ -609,9 +617,11 @@ impl CodexThread {
             turn_id,
             thread_settings,
             trace,
+            prompt_cache_ttl,
             cyber_access_program,
         } = request;
         let start_options = TurnStartOptions {
+            prompt_cache_ttl,
             cyber_access_program,
             ..self.session.recovered_turn_start_options(&turn_id).await
         };
@@ -745,6 +755,13 @@ impl CodexThread {
             return Err(items);
         }
         self.session.inject_if_running(items).await
+    }
+
+    /// Delivers an extension's untrusted context only to the turn that produced it.
+    pub async fn inject_untrusted_context_for_turn(&self, turn_id: &str, key: &str, value: String) {
+        self.session
+            .inject_untrusted_context_for_turn(turn_id, key, value)
+            .await;
     }
 
     /// Environment selections captured by the active turn, before later settings updates.
@@ -984,7 +1001,7 @@ impl CodexThread {
         Ok(())
     }
 
-    /// Review the final injected exec, patch, or permission request without executing it.
+    /// Review the final injected tool call without executing it.
     pub async fn guardian_review(
         &self,
         cancellation: &CancellationToken,
@@ -995,7 +1012,7 @@ impl CodexThread {
         let history = self.session.clone_history().await;
         let tool_call = history.raw_items().next_back().cloned().ok_or_else(|| {
             CodexErr::InvalidRequest(
-                "expected a final plaintext exec_command, apply_patch, or request_permissions call"
+                "expected a final plaintext exec_command, apply_patch, request_permissions, or MCP call"
                     .into(),
             )
         })?;
@@ -1144,6 +1161,11 @@ impl CodexThread {
         self.session.state_db()
     }
 
+    /// Resolves the model selected for future turns using this thread's catalog and settings.
+    pub async fn selected_model_info(&self) -> Arc<ModelInfo> {
+        self.session.selected_model_info().await
+    }
+
     pub async fn config_snapshot(&self) -> ThreadConfigSnapshot {
         self.session.thread_config_snapshot().await
     }
@@ -1193,6 +1215,11 @@ impl CodexThread {
             .into_iter()
             .map(Into::into)
             .collect()
+    }
+
+    /// The thread's MCP manager also owns its actor-scoped plugin and runtime auth state.
+    pub fn mcp_manager(&self) -> Arc<crate::mcp::McpManager> {
+        Arc::clone(&self.session.services.mcp_manager)
     }
 
     pub async fn config(&self) -> Arc<crate::config::Config> {
@@ -1378,14 +1405,14 @@ impl CodexThread {
     pub async fn read_mcp_resource_for_call(
         &self,
         call_id: &str,
-        uri: &str,
+        params: ReadResourceRequestParams,
     ) -> anyhow::Result<serde_json::Value> {
         self.session.refresh_mcp_if_dirty().await;
         let result = self
             .session
             .services
             .mcp_runtime
-            .read_resource_for_call(self.session.thread_id, call_id, uri)
+            .read_resource_for_call(self.session.thread_id, call_id, params)
             .await?;
 
         Ok(serde_json::to_value(result)?)

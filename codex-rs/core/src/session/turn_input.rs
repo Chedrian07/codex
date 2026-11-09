@@ -38,6 +38,7 @@ use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AdditionalContextEntry;
+use codex_protocol::protocol::AdditionalContextKind;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::Event;
@@ -151,7 +152,9 @@ impl PreparedTurnInputSettings {
         let TurnStartOptions {
             turn_trigger,
             final_output_json_schema,
+            direct_only_tool_namespaces,
             service_tier,
+            prompt_cache_ttl,
             parent_turn_id,
             initiating_agent_path,
             root_turn_id,
@@ -167,7 +170,9 @@ impl PreparedTurnInputSettings {
         updates.service_tier_for_turn = service_tier;
 
         let options = NewTurnContextOptions {
+            direct_only_tool_namespaces,
             final_output_json_schema,
+            prompt_cache_ttl,
             cyber_access_program,
         };
         let turn_context = match kind {
@@ -241,6 +246,14 @@ pub(super) async fn handle(
     submission_id: String,
 ) -> CodexResult<TurnInputSubmission> {
     let request = request.into();
+    if request.request.start.service_tier.is_some()
+        && crate::agent::host::host_child_uses_shared_service_tier(session)
+    {
+        return Err(CodexErr::InvalidRequest(
+            "per-turn service tier overrides are unavailable for a child using the shared service tier"
+                .into(),
+        ));
+    }
     if let SubmittedTurnInput::ResponseItem(item)
     | SubmittedTurnInput::AnnotatedResponseItem(AnnotatedResponseItem { item, .. }) =
         &request.request.input
@@ -637,20 +650,23 @@ async fn start_if_idle(
         TurnStartKind::Automatic | TurnStartKind::Recovery => {
             // Empty automatic user input resumes sampling without a new message.
             if !matches!(&input, SubmittedTurnInput::UserInput { .. }) {
+                task_input.push(
+                    pending_turn_input(
+                        session,
+                        input,
+                        sender_messages.as_ref(),
+                        &turn_context.sub_id,
+                        input_metadata,
+                    )
+                    .await,
+                );
+                // Automatic turns drain their queued input before sampling. Keep the
+                // context and the input it describes together for the first request.
                 session
                     .input_queue
                     .extend_pending_input_for_turn_state(
                         turn_state.as_ref(),
-                        vec![
-                            pending_turn_input(
-                                session,
-                                input,
-                                sender_messages.as_ref(),
-                                &turn_context.sub_id,
-                                input_metadata,
-                            )
-                            .await,
-                        ],
+                        std::mem::take(&mut task_input),
                     )
                     .await;
             }
@@ -722,6 +738,53 @@ async fn steer(
 }
 
 impl Session {
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "deliver context atomically to its originating turn"
+    )]
+    pub(crate) async fn inject_untrusted_context_for_turn(
+        &self,
+        turn_id: &str,
+        key: &str,
+        value: String,
+    ) {
+        let active = self.active_turn.lock().await;
+        let Some(turn) = active.as_ref().filter(|turn| turn.finishing.is_none()) else {
+            return;
+        };
+        let Some(task) = turn
+            .task
+            .as_ref()
+            .filter(|task| task.turn_context.sub_id == turn_id)
+        else {
+            return;
+        };
+        let input = self.state.lock().await.additional_context.extend(
+            BTreeMap::from([(
+                key.to_owned(),
+                AdditionalContextEntry::new(value, AdditionalContextKind::Untrusted),
+            )]),
+            self.additional_context_format(),
+            &task.turn_context.session_telemetry,
+        );
+        if !input.is_empty() {
+            self.input_queue
+                .extend_pending_input_for_turn_state(
+                    &turn.turn_state,
+                    input.into_iter().map(TurnInput::ResponseItem).collect(),
+                )
+                .await;
+        }
+    }
+
+    fn additional_context_format(&self) -> AdditionalContextFormat {
+        if self.enabled(Feature::UntrustedAsToolOutput) {
+            AdditionalContextFormat::ToolOutputs
+        } else {
+            AdditionalContextFormat::Messages
+        }
+    }
+
     /// Called under the active-turn lock when registering a task (or a realtime transcript turn).
     pub(crate) async fn record_started_turn(
         &self,
@@ -743,7 +806,7 @@ impl Session {
         &self,
     ) -> Option<(Arc<tokio::sync::Mutex<TurnState>>, TurnStartOptions)> {
         let mut active_turn = self.active_turn.lock().await;
-        if active_turn.is_some() {
+        if active_turn.is_some() || self.outcome_handoffs_closed() {
             return None;
         }
         let has_trigger_turn = self.input_queue.has_trigger_turn_mailbox_items().await;
@@ -989,11 +1052,7 @@ async fn merge_additional_context_input(
     turn_context: &TurnContext,
     additional_context: BTreeMap<String, AdditionalContextEntry>,
 ) -> Vec<TurnInput> {
-    let format = if session.enabled(Feature::UntrustedAsToolOutput) {
-        AdditionalContextFormat::ToolOutputs
-    } else {
-        AdditionalContextFormat::Messages
-    };
+    let format = session.additional_context_format();
     let additional_context_input = {
         let mut state = session.state.lock().await;
         state

@@ -3,6 +3,9 @@
 //! This module owns the typed JSON-RPC calls needed by the TUI and keeps
 //! request/response plumbing out of `App` and `ChatWidget`.
 
+mod account;
+pub(crate) use account::SessionAccount;
+mod cloud_project;
 mod daybreak_api_key_compat;
 mod events;
 mod external_agent_config;
@@ -17,8 +20,11 @@ mod read_state;
 mod realtime;
 mod rollout_history;
 pub(crate) use read_state::unread_revision;
+mod side_chat_history;
+use side_chat_history::side_context_checkpoint;
 mod startup_launch;
 mod thread_list;
+pub(crate) mod user_message_submission;
 mod web_search;
 
 #[cfg(test)]
@@ -31,6 +37,8 @@ pub(crate) use history::HISTORY_ITEM_SCAN_LIMIT;
 pub(crate) use history::HistoryHydrationScope;
 pub(crate) use history::INITIAL_HISTORY_TURN_LIMIT;
 pub(crate) use history::thread_items_page_params;
+pub(crate) use side_chat_history::SideChat;
+pub(crate) use side_chat_history::side_chat_prompt_preview;
 pub(crate) use startup_launch::StartupLaunchChoices;
 
 use crate::app_event::PermissionProfileSelection;
@@ -64,8 +72,6 @@ use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::LogoutAccountResponse;
 use codex_app_server_protocol::MemoryResetResponse;
 use codex_app_server_protocol::Model as ApiModel;
-use codex_app_server_protocol::ModelListParams;
-use codex_app_server_protocol::ModelListResponse;
 use codex_app_server_protocol::NewThreadModelDefaults;
 use codex_app_server_protocol::RateLimitSnapshot;
 use codex_app_server_protocol::RequestId;
@@ -140,6 +146,7 @@ use codex_app_server_protocol::TurnSteerParams;
 use codex_app_server_protocol::TurnSteerResponse;
 use codex_app_server_protocol::UserInput;
 use codex_config::ConfigLayerSource;
+use codex_context_fragments::SideConversationPolicy;
 use codex_otel::TelemetryAuthMode;
 use codex_protocol::ThreadId;
 use codex_protocol::approvals::GuardianAssessmentEvent;
@@ -156,9 +163,11 @@ use codex_protocol::openai_models::ReasoningEffortPreset;
 use codex_protocol::protocol::SubAgentSource;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
-use color_eyre::eyre::ContextCompat;
 use color_eyre::eyre::Result;
 use color_eyre::eyre::WrapErr;
+use futures::FutureExt;
+use futures::future::Either;
+use futures::future::RemoteHandle;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -197,7 +206,32 @@ enum EmptyCatalogFallback {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ForkPresentation {
     Regular,
-    SideConversation,
+    SideConversation(SideChatStorage),
+}
+
+pub(crate) const ATTACHED_SIDE_CHAT_SOURCE: &str = "tui_side_chat";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SideChatStorage {
+    Temporary,
+    Attached,
+}
+
+impl SideChatStorage {
+    fn policy(self) -> SideConversationPolicy {
+        match self {
+            Self::Temporary => SideConversationPolicy::Temporary,
+            Self::Attached => SideConversationPolicy::Attached,
+        }
+    }
+
+    pub(crate) fn configure_fork(self, config: &mut Config) {
+        config.ephemeral = self == Self::Temporary;
+        config.developer_instructions = Some(
+            self.policy()
+                .instructions(config.developer_instructions.as_deref()),
+        );
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -322,7 +356,8 @@ pub(crate) struct AppServerBootstrap {
     /// with `has_chatgpt_account` to decide if a startup rate-limit prefetch
     /// should be fired.
     pub(crate) requires_openai_auth: bool,
-    pub(crate) default_model: String,
+    /// Cloud supplies its model when it starts or resumes a thread.
+    pub(crate) default_model: Option<String>,
     pub(crate) feedback_audience: FeedbackAudience,
     pub(crate) has_chatgpt_account: bool,
     pub(crate) available_models: Vec<ModelPreset>,
@@ -357,6 +392,7 @@ pub(crate) struct AppServerSession {
     pub(crate) thread_settings_update_supported: bool,
     default_model: Option<String>,
     available_models: Vec<ModelPreset>,
+    prefetched_model_list: Option<RemoteHandle<Result<Vec<ModelPreset>>>>,
     daybreak_api_key_compat: Arc<tokio::sync::Semaphore>,
     managed_new_thread_defaults: Option<NewThreadModelDefaults>,
     external_agent_config_import_id: Mutex<Option<String>>,
@@ -420,6 +456,8 @@ pub(crate) enum ResumeModelSettings {
     RestoreFromThread,
     /// Rejoins a loaded thread without changing any of its existing settings.
     PreserveExistingThread,
+    /// Restore the saved settings and reapply the side-chat instructions on cold resume.
+    PreserveSideConversation,
 }
 
 impl ThreadParamsMode {
@@ -438,6 +476,15 @@ impl ThreadParamsMode {
             Self::Remote | Self::Cloud => None,
         }
     }
+}
+
+#[derive(Debug)]
+pub(crate) struct SidebarFork {
+    pub(crate) thread: AppServerStartedThread,
+    pub(crate) boundary: Result<(), String>,
+    pub(crate) inherited_profile: bool,
+    pub(crate) storage: SideChatStorage,
+    legacy: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -563,6 +610,7 @@ impl AppServerSession {
             thread_settings_update_supported: true,
             default_model: None,
             available_models: Vec::new(),
+            prefetched_model_list: None,
             daybreak_api_key_compat: Arc::new(tokio::sync::Semaphore::new(/*permits*/ 1)),
             managed_new_thread_defaults: None,
             external_agent_config_import_id: Mutex::default(),
@@ -788,6 +836,23 @@ impl AppServerSession {
         client.codex_home()
     }
 
+    pub(crate) fn prefetch_model_list(&mut self) {
+        let (request, models) = self.request_model_list().remote_handle();
+        tokio::spawn(request);
+        self.prefetched_model_list = Some(models);
+    }
+
+    fn request_model_list(&mut self) -> impl Future<Output = Result<Vec<ModelPreset>>> + use<> {
+        let mode = self.thread_params_mode;
+        let handle = self.request_handle();
+        let request_id = self.next_request_id();
+        async move {
+            models::list(mode, handle, request_id).await.map_err(|err| {
+                bootstrap_request_error("model/list failed during TUI bootstrap", err)
+            })
+        }
+    }
+
     pub(crate) async fn bootstrap(&mut self, config: &Config) -> Result<AppServerBootstrap> {
         let started_at = Instant::now();
         let account = self.read_account().await?;
@@ -828,26 +893,13 @@ impl AppServerSession {
         fallback: EmptyCatalogFallback,
     ) -> Result<AppServerBootstrap> {
         let started_at = Instant::now();
-        // `hooks/list` holds the global config queue during startup. Submit models and config
-        // requirements together so an uncached model fetch can overlap both config requests.
-        let model_request_id = self.next_request_id();
+        let models = match self.prefetched_model_list.take() {
+            Some(models) => Either::Left(models),
+            None => Either::Right(self.request_model_list()),
+        };
         let requirements_request_id = self.next_request_id();
-        let (models, requirements, collaboration_modes) = tokio::try_join!(
-            async {
-                self.request_handle
-                    .request_typed::<ModelListResponse>(ClientRequest::ModelList {
-                        request_id: model_request_id,
-                        params: ModelListParams {
-                            cursor: None,
-                            limit: None,
-                            include_hidden: Some(true),
-                        },
-                    })
-                    .await
-                    .map_err(|err| {
-                        bootstrap_request_error("model/list failed during TUI bootstrap", err)
-                    })
-            },
+        let (mut available_models, requirements, collaboration_modes) = tokio::try_join!(
+            models,
             async {
                 match self
                     .request_handle
@@ -877,11 +929,6 @@ impl AppServerSession {
             },
             async { Ok(crate::collaboration_modes::list(self.request_handle()).await) },
         )?;
-        let mut available_models = models
-            .data
-            .into_iter()
-            .map(model_preset_from_api_model)
-            .collect::<Vec<_>>();
         if let Some(requirements) = &requirements {
             crate::service_tier_resolution::constrain_server_service_tiers(
                 &mut available_models,
@@ -925,68 +972,26 @@ impl AppServerSession {
                     .managed_new_thread_defaults
                     .as_ref()
                     .and_then(|defaults| defaults.model.clone()),
-            })
-            .wrap_err("No models are available. Set `model` explicitly or check your model catalog configuration.")?;
-        self.default_model = Some(default_model.clone());
+            });
+        if default_model.is_none() && self.thread_params_mode != ThreadParamsMode::Cloud {
+            color_eyre::eyre::bail!(
+                "No models are available. Set `model` explicitly or check your model catalog configuration."
+            );
+        }
+        self.default_model.clone_from(&default_model);
         self.available_models = available_models.clone();
 
-        let (
-            account_email,
-            auth_mode,
-            status_account_display,
-            plan_type,
-            feedback_audience,
-            has_chatgpt_account,
-        ) = match account.account {
-            Some(Account::ApiKey {}) => (
-                None,
-                Some(TelemetryAuthMode::ApiKey),
-                Some(StatusAccountDisplay::ApiKey),
-                None,
-                FeedbackAudience::External,
-                false,
-            ),
-            Some(Account::Chatgpt {
-                email,
-                plan_type,
-                workspace_name,
-            }) => {
-                let feedback_audience = if email
-                    .as_deref()
-                    .is_some_and(|email| email.ends_with("@openai.com"))
-                {
-                    FeedbackAudience::OpenAiEmployee
-                } else {
-                    FeedbackAudience::External
-                };
-                (
-                    email.clone(),
-                    Some(TelemetryAuthMode::Chatgpt),
-                    Some(StatusAccountDisplay::ChatGpt {
-                        email,
-                        plan: Some(plan_type_display_name(plan_type)),
-                        workspace: workspace_display(workspace_name, account.workspace_routing),
-                    }),
-                    Some(plan_type),
-                    feedback_audience,
-                    true,
-                )
-            }
-            Some(Account::AmazonBedrock { .. } | Account::Gcp {}) => {
-                (None, None, None, None, FeedbackAudience::External, false)
-            }
-            None => (None, None, None, None, FeedbackAudience::External, false),
-        };
+        let account = SessionAccount::from(account);
         Ok(AppServerBootstrap {
             duration: started_at.elapsed(),
-            account_email,
-            auth_mode,
-            status_account_display,
-            plan_type,
+            account_email: account.email().map(str::to_owned),
+            auth_mode: account.auth_mode(),
+            feedback_audience: account.feedback_audience(),
+            has_chatgpt_account: account.has_chatgpt_account(),
+            status_account_display: account.display,
+            plan_type: account.plan,
             requires_openai_auth: account.requires_openai_auth,
             default_model,
-            feedback_audience,
-            has_chatgpt_account,
             available_models,
             collaboration_modes,
             allowed_approval_policies,
@@ -1015,7 +1020,7 @@ impl AppServerSession {
                 },
             })
             .await
-            .map_err(|err| bootstrap_request_error("account/read failed during TUI bootstrap", err))
+            .map_err(|err| bootstrap_request_error("account/read failed", err))
     }
 
     pub(crate) async fn next_event(&mut self) -> Option<AppServerSessionEvent> {
@@ -1041,6 +1046,7 @@ impl AppServerSession {
             /*session_start_source*/ None,
             /*remote_cwd_override*/ None,
             /*selected_profile*/ None,
+            /*host_project_cwd*/ None,
         )
         .await
     }
@@ -1052,6 +1058,7 @@ impl AppServerSession {
         session_start_source: Option<ThreadStartSource>,
         remote_cwd_override: Option<&std::path::Path>,
         selected_profile: Option<&PermissionProfileSelection>,
+        host_project_cwd: Option<&std::path::Path>,
     ) -> Result<AppServerStartedThread> {
         if self.thread_params_mode.settings_owner() == ThreadSettingsOwner::Server
             && selected_profile.is_some()
@@ -1092,12 +1099,27 @@ impl AppServerSession {
             self.thread_tool_transport().configure(&mut params);
         }
         let request_handle = self.request_handle();
-        let (response, history_support, task_tools_available) =
-            request_thread_start_with_history_fallback(&request_handle, request_id, params)
+        let project = if self.thread_params_mode == ThreadParamsMode::Cloud {
+            match host_project_cwd {
+                Some(cwd) => cloud_project::from_local_cwd(cwd).await,
+                None => None,
+            }
+        } else {
+            None
+        };
+        let started = match project {
+            Some(project) => request_handle
+                .start_cloud_project_thread(request_id, params, project)
                 .await
-                .map_err(|err| {
-                    bootstrap_request_error("thread/start failed during TUI bootstrap", err)
-                })?;
+                .map(|response| (response, ThreadHistorySupport::Paginated, false)),
+            None => {
+                request_thread_start_with_history_fallback(&request_handle, request_id, params)
+                    .await
+            }
+        };
+        let (response, history_support, task_tools_available) = started.map_err(|err| {
+            bootstrap_request_error("thread/start failed during TUI bootstrap", err)
+        })?;
         if history_support == ThreadHistorySupport::LegacyOnly {
             self.history_support = ThreadHistorySupport::LegacyOnly;
         }
@@ -1218,13 +1240,98 @@ impl AppServerSession {
         .await
     }
 
+    /// Fork and inject the side boundary on a request-only view. The live session
+    /// keeps receiving notifications and drawing frames while these RPCs run.
+    pub(crate) fn sidebar_fork(
+        &self,
+        settings: LocalSettings,
+        config: Config,
+        parent: ThreadId,
+        profile: Option<PermissionProfileSelection>,
+        preferred_storage: SideChatStorage,
+    ) -> impl Future<Output = Result<SidebarFork>> + Send + use<> {
+        let mut view = self
+            .request_view()
+            .with_thread_tool_transport(self.thread_tool_transport());
+        if self.task_tools_available(parent) {
+            view.remember_task_tool_thread(parent);
+        }
+        async move {
+            let mut storage = SideChatStorage::Temporary;
+            if preferred_storage == SideChatStorage::Attached
+                && view.attached_side_chat_query(parent).await?.is_some()
+                && {
+                    let thread = view.thread_read(parent, /*include_turns*/ false).await?;
+                    !thread.ephemeral && thread.history_mode == ThreadHistoryMode::Paginated
+                }
+            {
+                storage = SideChatStorage::Attached;
+            }
+            let fork = view
+                .fork_side_thread(&settings, config.clone(), parent, profile.as_ref(), storage)
+                .await;
+            let thread = match fork {
+                Err(err)
+                    if storage == SideChatStorage::Attached
+                        && side_chat_history::is_attached_thread_store_unsupported(&err) =>
+                {
+                    storage = SideChatStorage::Temporary;
+                    view.fork_side_thread(&settings, config, parent, profile.as_ref(), storage)
+                        .await?
+                }
+                result => result?,
+            };
+            let child = thread.session.thread_id;
+            let items = storage.policy().fork_items();
+            let boundary = match view.thread_inject_items(child, items).await {
+                Ok(_) if storage == SideChatStorage::Attached => {
+                    match side_context_checkpoint(thread.session.rollout_path.as_deref()).await {
+                        Ok(Some(_)) => Ok(()),
+                        Ok(None) => Err("Side conversation context was not saved".to_string()),
+                        Err(err) => Err(err.to_string()),
+                    }
+                }
+                result => result.map(|_| ()).map_err(|err| err.to_string()),
+            };
+            if let Err(message) = &boundary
+                && storage == SideChatStorage::Attached
+            {
+                if let Err(error) = view.thread_delete(child).await {
+                    tracing::warn!(%child, %error, "failed to roll back attached side chat");
+                } else {
+                    color_eyre::eyre::bail!(
+                        "Failed to prepare side conversation {child}: {message}"
+                    );
+                }
+            }
+            Ok(SidebarFork {
+                thread,
+                boundary,
+                inherited_profile: profile.is_some(),
+                storage,
+                legacy: view.history_support == ThreadHistorySupport::LegacyOnly,
+            })
+        }
+    }
+
+    pub(crate) fn observe_sidebar_fork(&mut self, fork: &SidebarFork) {
+        if fork.legacy {
+            self.history_support = ThreadHistorySupport::LegacyOnly;
+        }
+        if fork.thread.task_tools_available {
+            self.remember_task_tool_thread(fork.thread.session.thread_id);
+        }
+    }
+
     pub(crate) async fn fork_side_thread(
         &mut self,
         local_settings: &LocalSettings,
-        config: Config,
+        mut config: Config,
         thread_id: ThreadId,
         selected_profile: Option<&PermissionProfileSelection>,
+        storage: SideChatStorage,
     ) -> Result<AppServerStartedThread> {
+        storage.configure_fork(&mut config);
         self.fork_thread_at_with_presentation(
             local_settings,
             config,
@@ -1232,7 +1339,7 @@ impl AppServerSession {
             /*last_turn_id*/ None,
             /*before_turn_id*/ None,
             ForkGoalContinuation::StartIfIdle,
-            ForkPresentation::SideConversation,
+            ForkPresentation::SideConversation(storage),
             selected_profile,
             ForkPermissionMode::InheritSaved,
             ForkConfigSource::Session,
@@ -1266,13 +1373,13 @@ impl AppServerSession {
                 .thread_read(thread_id, /*include_turns*/ false)
                 .await
                 .ok(),
-            ForkPresentation::SideConversation => None,
+            ForkPresentation::SideConversation(_) => None,
         };
         let exclude_turns = self.history_support == ThreadHistorySupport::Paginated
             && (fork_parent
                 .as_ref()
                 .is_some_and(|thread| thread.history_mode == ThreadHistoryMode::Paginated)
-                || presentation == ForkPresentation::SideConversation);
+                || presentation != ForkPresentation::Regular);
         let request_id = self.next_request_id();
         let session_config = if config.model.is_none() {
             // Avoid inferring a tier from the stale client default model.
@@ -1281,6 +1388,8 @@ impl AppServerSession {
             self.session_config_with_effective_service_tier(&config)
         };
         let mut params = ThreadForkParams {
+            attach_to_source: presentation
+                == ForkPresentation::SideConversation(SideChatStorage::Attached),
             last_turn_id,
             before_turn_id,
             defer_goal_continuation: goal_continuation == ForkGoalContinuation::DeferUntilNextTurn,
@@ -1292,6 +1401,10 @@ impl AppServerSession {
                 self.remote_cwd_override.as_deref(),
             )
         };
+        if params.attach_to_source {
+            params.thread_source =
+                Some(ThreadSource::Feature(ATTACHED_SIDE_CHAT_SOURCE.to_string()));
+        }
         params.model_provider = match config_source {
             ForkConfigSource::Local => self
                 .model_provider_override
@@ -1339,7 +1452,9 @@ impl AppServerSession {
         {
             Ok(response) => response,
             Err(TypedRequestError::Server { source, .. })
-                if params.exclude_turns && is_history_pagination_unsupported(&source) =>
+                if params.exclude_turns
+                    && !params.attach_to_source
+                    && is_history_pagination_unsupported(&source) =>
             {
                 self.history_support = ThreadHistorySupport::LegacyOnly;
                 params.exclude_turns = false;
@@ -1395,7 +1510,7 @@ impl AppServerSession {
         if let Some(permissions) = selected_permissions {
             started.session.permission_profile = permissions;
         }
-        if presentation == ForkPresentation::SideConversation {
+        if presentation != ForkPresentation::Regular {
             started.session.daybreak_enabled = false;
         }
         started.session.fork_parent_title = fork_parent.and_then(|thread| thread.name);
@@ -2534,10 +2649,24 @@ fn thread_resume_params_from_config(
     permission_overrides: crate::resume_permissions::ResumePermissions,
 ) -> ThreadResumeParams {
     if thread_params_mode.settings_owner() == ThreadSettingsOwner::Server
-        || model_settings == ResumeModelSettings::PreserveExistingThread
+        || matches!(
+            model_settings,
+            ResumeModelSettings::PreserveExistingThread
+                | ResumeModelSettings::PreserveSideConversation
+        )
     {
         return ThreadResumeParams {
             thread_id: thread_id.to_string(),
+            developer_instructions: if model_settings
+                == ResumeModelSettings::PreserveSideConversation
+            {
+                with_terminal_visualization_instructions(
+                    &config,
+                    config.developer_instructions.clone(),
+                )
+            } else {
+                None
+            },
             ..ThreadResumeParams::default()
         };
     }
@@ -2565,9 +2694,9 @@ fn thread_resume_params_from_config(
             config.model.clone(),
             provider_selection::explicit_provider(&config),
         ),
-        ResumeModelSettings::RestoreFromThread | ResumeModelSettings::PreserveExistingThread => {
-            (None, None)
-        }
+        ResumeModelSettings::RestoreFromThread
+        | ResumeModelSettings::PreserveExistingThread
+        | ResumeModelSettings::PreserveSideConversation => (None, None),
     };
     let mut params = ThreadResumeParams {
         thread_id: thread_id.to_string(),
@@ -2966,6 +3095,7 @@ mod tests {
     use app_test_support::create_fake_paginated_rollout;
     use app_test_support::create_fake_rollout;
     use codex_app_server_protocol::ThreadItem;
+    use codex_app_server_protocol::ThreadItemsListCursor;
     use codex_app_server_protocol::ThreadStatus;
     use codex_app_server_protocol::Turn;
     use codex_app_server_protocol::TurnStatus;
@@ -2990,6 +3120,7 @@ mod tests {
     use codex_utils_absolute_path::test_support::test_path_buf;
     use codex_utils_path_uri::LegacyAppPathString;
     use pretty_assertions::assert_eq;
+    use serde_json::json;
     use tempfile::TempDir;
 
     async fn build_config(temp_dir: &TempDir) -> Config {
@@ -3060,6 +3191,7 @@ mod tests {
         let mut app_server = crate::start_embedded_app_server_for_picker(&config).await?;
         let next_request_id = app_server.next_request_id;
         let account = GetAccountResponse {
+            user_id: None,
             workspace_routing: None,
             account: Some(Account::Chatgpt {
                 email: Some("teammate@openai.com".to_string()),
@@ -3122,6 +3254,7 @@ mod tests {
                 .bootstrap_with_account(
                     &client_config,
                     GetAccountResponse {
+                        user_id: None,
                         account: Some(Account::ApiKey {}),
                         requires_openai_auth: true,
                         workspace_routing: None,
@@ -3165,9 +3298,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cloud_bootstrap_uses_server_models_without_config_requirements() -> Result<()> {
+    async fn cloud_bootstrap_waits_for_the_thread_to_supply_its_model() -> Result<()> {
         let codex_home = tempfile::tempdir()?;
-        let config = build_config(&codex_home).await;
+        let mut config = build_config(&codex_home).await;
+        config.model = Some("local-only-model".to_string());
         let (client, mut commands, _events) =
             codex_app_server_client::CloudClient::channel(/*capacity*/ 3);
         let mut app_server = AppServerSession::new(
@@ -3176,6 +3310,7 @@ mod tests {
             ThreadParamsMode::Cloud,
         );
         let account = GetAccountResponse {
+            user_id: None,
             account: Some(Account::Chatgpt {
                 email: Some("teammate@openai.com".to_string()),
                 plan_type: codex_protocol::account::PlanType::Plus,
@@ -3187,7 +3322,7 @@ mod tests {
 
         let (bootstrap, ()) =
             tokio::join!(app_server.bootstrap_with_account(&config, account), async {
-                for _ in 0..3 {
+                for _ in 0..2 {
                     let command = commands.recv().await.expect("bootstrap request");
                     let codex_app_server_client::CloudOperation::Request(request) =
                         command.operation
@@ -3195,15 +3330,6 @@ mod tests {
                         panic!("expected bootstrap request")
                     };
                     let result = match *request {
-                        ClientRequest::ModelList { .. } => {
-                            Ok(serde_json::to_value(ModelListResponse {
-                                data: vec![api_model_with_upgrade_retirement_at(
-                                    /*retirement_at*/ None,
-                                )],
-                                next_cursor: None,
-                            })
-                            .expect("model response should serialize"))
-                        }
                         ClientRequest::ConfigRequirementsRead { .. } => Err(JSONRPCErrorError {
                             code: JSONRPC_METHOD_NOT_FOUND,
                             message: "method not found".to_string(),
@@ -3219,8 +3345,8 @@ mod tests {
             });
         let bootstrap = bootstrap?;
 
-        assert_ne!(config.model.as_deref(), Some("current-model"));
-        assert_eq!(bootstrap.default_model, "current-model");
+        assert_eq!(bootstrap.default_model, None);
+        assert!(bootstrap.available_models.is_empty());
         Ok(())
     }
 
@@ -4444,6 +4570,7 @@ mod tests {
                 ephemeral_config,
                 source_thread_id,
                 /*selected_profile*/ None,
+                crate::app_server_session::SideChatStorage::Temporary,
             )
             .await?;
 
@@ -4571,6 +4698,7 @@ mod tests {
                 side_config,
                 source_thread_id,
                 /*selected_profile*/ None,
+                crate::app_server_session::SideChatStorage::Temporary,
             )
             .await?;
 
@@ -4674,6 +4802,7 @@ mod tests {
                 config,
                 thread_id,
                 /*selected_profile*/ None,
+                crate::app_server_session::SideChatStorage::Temporary,
             )
             .await?;
 
@@ -4826,6 +4955,7 @@ mod tests {
                         ),
                         ThreadItem::untimed(
                             codex_app_server_protocol::ThreadItemPayload::AgentMessage {
+                                moderation: None,
                                 id: "assistant-1".to_string(),
                                 text: "assistant reply".to_string(),
                                 phase: None,
@@ -4938,6 +5068,7 @@ mod tests {
         .expect("embedded resume response should map");
         assert_eq!(started.session.permission_profile, read_only_profile);
 
+        let mut thread = response.thread.clone();
         let mut empty_roots_response = response;
         empty_roots_response.runtime_workspace_roots = Vec::new();
         let started = started_thread_from_resume_response(
@@ -4948,6 +5079,67 @@ mod tests {
         .await
         .expect("resume response should map");
         assert_eq!(started.session.runtime_workspace_roots, Vec::new());
+
+        // Cloud can filter every item in its newest page while older prompts remain.
+        thread.history_mode = ThreadHistoryMode::Paginated;
+        let mut turn = thread.turns.pop().unwrap();
+        let prompt = turn.items.remove(0);
+        turn.items.clear();
+        turn.items_view = codex_app_server_protocol::TurnItemsView::NotLoaded;
+        let (client, mut commands, _events) =
+            codex_app_server_client::CloudClient::channel(/*capacity*/ 1);
+        let mut server = AppServerSession::new(
+            crate::backend_id::BackendId::new(),
+            AppServerClient::Cloud(client),
+            ThreadParamsMode::Cloud,
+        );
+        let worker = tokio::spawn(async move {
+            while let Some(command) = commands.recv().await {
+                let codex_app_server_client::CloudOperation::Request(request) = command.operation
+                else {
+                    panic!("expected history request");
+                };
+                let reply = match *request {
+                    ClientRequest::ThreadTurnsList { .. } => json!({"data": [turn]}),
+                    ClientRequest::ThreadItemsList { params, .. } if params.cursor.is_none() => {
+                        json!({"data": [], "nextCursor": "older"})
+                    }
+                    ClientRequest::ThreadItemsList { params, .. }
+                        if params.cursor == Some(ThreadItemsListCursor::Opaque("older".into())) =>
+                    {
+                        assert_eq!(params.limit, Some(HISTORY_ITEM_PAGE_LIMIT));
+                        json!({"data": [{"turnId": turn.id, "item": prompt}], "nextCursor": "oldest"})
+                    }
+                    request => panic!("unexpected history request: {request:?}"),
+                };
+                command.response.send(Ok(Ok(reply))).unwrap();
+            }
+        });
+        let mut settings = LocalSettings::from(&config);
+        settings.transcript_mode = crate::transcript_mode::TranscriptMode::Terminal;
+        settings.tui.terminal_resize_reflow_max_rows = Some(1);
+        server
+            .hydrate_initial_thread_history(
+                &mut thread,
+                /*turn_cursor*/ None,
+                /*item_cursor*/ None,
+                Some(&config),
+                Some(&settings),
+                HistoryHydrationScope::Initial,
+            )
+            .await
+            .expect("Cloud history should load past a hidden page");
+        let cells = crate::thread_transcript::thread_to_transcript_cells(
+            thread,
+            crate::thread_transcript::RawReasoningVisibility::Hidden,
+            /*config*/ None,
+        );
+        let lines = cells[0].display_lines(/*width*/ 80);
+        insta::assert_snapshot!(lines.get(1).map(ToString::to_string).unwrap_or_default(), @"› hello from history");
+        let next = server.begin_older_history_page(thread_id);
+        assert_eq!(next.as_deref(), Some("oldest"));
+        drop(server);
+        worker.await.unwrap();
     }
 
     #[tokio::test]

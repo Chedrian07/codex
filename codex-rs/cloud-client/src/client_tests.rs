@@ -8,6 +8,7 @@ use hyper::service::service_fn;
 use hyper_util::rt::TokioExecutor;
 use hyper_util::rt::TokioIo;
 use pretty_assertions::assert_eq;
+use prost::Message;
 use std::convert::Infallible;
 use tokio::sync::mpsc;
 
@@ -156,6 +157,23 @@ async fn activation_preserves_native_settings_and_thread_metadata() {
         (response_bytes, thread)
     };
 
+    // Activation retains stricter runtime requirements than stored list metadata.
+    for (session_id, model_provider) in [("", "p"), ("s", "")] {
+        let (response_bytes, _) = encode_response(1, Some(true), 2);
+        let mut settings =
+            crate::activation_wire::UpdateConfigResponse::decode(Bytes::from(response_bytes))
+                .unwrap();
+        let mut thread =
+            crate::activation_wire::Thread::decode(settings.thread.take().unwrap()).unwrap();
+        thread.session_id = Some(session_id.into());
+        thread.model_provider = Some(model_provider.into());
+        settings.thread = Some(thread.encode_to_vec().into());
+        assert!(matches!(
+            ThreadActivation::from_settings(settings),
+            Err(Error::InvalidResponse)
+        ));
+    }
+
     for (mode, daybreak) in [(1, Some(true)), (2, Some(false)), (2, None)] {
         let (response_bytes, thread) = encode_response(mode, daybreak, 2);
         let mut server = fixture(response(
@@ -211,6 +229,55 @@ async fn activation_preserves_native_settings_and_thread_metadata() {
     ));
     assert_request(&mut server, "UpdateConfig", &[56, 1, 0x92, 1, 1, b't']).await;
     assert!(server.requests.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn prewarm_defers_readiness_only_for_selected_projects() {
+    let mut fixture = fixture_responses(vec![
+        response(vec![frame(&[])], tonic::Status::ok("")),
+        response(vec![frame(&[])], tonic::Status::ok("")),
+    ])
+    .await;
+
+    assert!(matches!(
+        fixture
+            .client
+            .prewarm_default_thread(/*model*/ None, /*model_provider*/ None)
+            .await,
+        Err(Error::InvalidResponse)
+    ));
+    assert_request(&mut fixture, "Prewarm", b"\x52\x04\x0a\x02\x0a\x00").await;
+
+    assert!(matches!(
+        fixture
+            .client
+            .prewarm_thread(
+                /*model*/ None,
+                /*model_provider*/ None,
+                Some(ProjectEnvironment {
+                    name: "App".to_owned(),
+                    cwd: Some("/workspace/acme/app".to_owned()),
+                    origin_urls: vec![
+                        "git@github.com:acme/app.git".to_owned(),
+                        "https://github.com/acme/lib.git".to_owned(),
+                    ],
+                }),
+            )
+            .await,
+        Err(Error::InvalidResponse)
+    ));
+    let expected = [
+        b"\x52\x73\x0a\x71\x0a\x6f\x0a\x0d" as &[u8],
+        b"asenvcfg_base",
+        b"\x12\x13/workspace/acme/app",
+        b"\x1a\x49\x0a\x42\x0a\x1d\x2a\x1b",
+        b"git@github.com:acme/app.git",
+        b"\x0a\x21\x2a\x1f",
+        b"https://github.com/acme/lib.git",
+        b"\x12\x03App\xe8\x01\x01",
+    ]
+    .concat();
+    assert_request(&mut fixture, "Prewarm", &expected).await;
 }
 
 #[tokio::test]
@@ -562,3 +629,6 @@ async fn https_enforces_unmanaged_endpoint_restrictions_before_connecting() {
 }
 #[path = "transcript_tests.rs"]
 mod transcript;
+
+#[path = "discovery_tests.rs"]
+mod discovery;
