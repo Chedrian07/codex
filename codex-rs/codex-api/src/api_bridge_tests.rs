@@ -359,6 +359,11 @@ fn map_api_error_preserves_typed_errors() {
 fn map_api_error_maps_http_and_wrapped_websocket_typed_errors() {
     for (code, expected_info, fallback) in [
         (
+            "content_policy_violation",
+            CodexErrorInfo::InvalidPrompt,
+            "The input was rejected by the content policy.",
+        ),
+        (
             "bio_policy",
             CodexErrorInfo::BioPolicy,
             "This content was flagged for possible biological risk.",
@@ -801,6 +806,59 @@ fn map_api_error_ignores_unparseable_rate_limit_reached_type_headers() {
             panic!("expected CodexErrorDetails::UsageLimitReached, got {err:?}");
         };
         assert_eq!(usage_limit.rate_limit_reached_type, None);
+    }
+}
+
+#[test]
+fn only_an_explicit_workspace_403_stops_retries() {
+    use http::StatusCode;
+    let provider = r#"{"error":{"code":"invalid_workspace_selected"}}"#;
+    let detail = r#"{"detail":{"code":"invalid_workspace_selected"}}"#;
+    let access_denied = r#"{"detail":{"code":"codex_workspace_access_denied"}}"#;
+    let other = r#"{"detail":{"code":"route_rate_limited"}}"#;
+    let workspace_header =
+        http::HeaderValue::from_str(&base64::engine::general_purpose::STANDARD.encode(provider))
+            .unwrap();
+    for (status, body, with_header, terminal) in [
+        (StatusCode::FORBIDDEN, detail, false, true),
+        (StatusCode::FORBIDDEN, access_denied, false, true),
+        (StatusCode::SERVICE_UNAVAILABLE, access_denied, false, false),
+        (StatusCode::FORBIDDEN, provider, false, true),
+        (StatusCode::FORBIDDEN, "", true, true),
+        (StatusCode::FORBIDDEN, "", false, false),
+        (
+            StatusCode::FORBIDDEN,
+            "invalid_workspace_selected",
+            false,
+            false,
+        ),
+        (StatusCode::FORBIDDEN, other, true, false),
+        (StatusCode::UNAUTHORIZED, detail, true, false),
+    ] {
+        let mut headers = HeaderMap::new();
+        headers.insert(REQUEST_ID_HEADER, http::HeaderValue::from_static("req-403"));
+        if with_header {
+            headers.insert(X_ERROR_JSON_HEADER, workspace_header.clone());
+        }
+        let err = map_api_error(ApiError::Transport(TransportError::Http {
+            status,
+            headers: Some(headers),
+            body: Some(body.to_owned()),
+            url: None,
+            retry_after: None,
+        }));
+        assert_eq!(
+            matches!(err.details(), CodexErrorDetails::WorkspaceAccessDenied(_)),
+            terminal,
+            "{err}"
+        );
+        assert_eq!(
+            err.retry_delay(/*retry_count*/ 1).is_none(),
+            terminal,
+            "{err}"
+        );
+        assert_eq!(err.http_status_code_value(), Some(status.as_u16()));
+        assert!(err.to_string().contains("req-403"));
     }
 }
 

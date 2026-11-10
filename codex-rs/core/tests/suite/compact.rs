@@ -1140,6 +1140,66 @@ async fn reasoning_effort_override_remote_v2_compaction_resets_pinned_effort(
     Ok(())
 }
 
+#[test_case::test_case(non_openai_model_provider, 403, json!({"detail": {"code": "invalid_workspace_selected"}}); "local workspace denial")]
+#[test_case::test_case(openai_model_provider, 403, json!({"detail": {"code": "invalid_workspace_selected"}}); "remote workspace denial")]
+#[test_case::test_case(non_openai_model_provider, 400, json!({"error": {"code": "content_policy_violation", "param": "input"}}); "local content policy denial")]
+#[test_case::test_case(openai_model_provider, 400, json!({"error": {"code": "content_policy_violation", "param": "input"}}); "remote content policy denial")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_denial_stops_compaction_on_model_downshift(
+    provider: fn(&MockServer) -> ModelProviderInfo,
+    status: u16,
+    body: Value,
+) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let previous = "gpt-5.4";
+    let selected = "gpt-5.2";
+    let model_provider = provider(&server);
+    let test = test_codex()
+        .with_model(previous)
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_config(move |config| {
+            config.model_provider = model_provider;
+            config.model_provider.stream_max_retries = Some(2);
+            config.model_catalog = Some(ModelsResponse {
+                models: vec![
+                    model_info_with_context_window(previous, /*context_window*/ 273_000),
+                    model_info_with_context_window(selected, /*context_window*/ 125_000),
+                ],
+            });
+            set_test_compact_prompt(config);
+        })
+        .build_with_auto_env(&server)
+        .await?;
+    mount_sse_once(
+        &server,
+        sse(vec![
+            ev_assistant_message("message", "First reply"),
+            ev_completed_with_tokens("first", /*total_tokens*/ 120_000),
+        ]),
+    )
+    .await;
+    test.submit_turn("first turn").await?;
+
+    let denied = responses::mount_response_handler(&server, move |_| {
+        wiremock::ResponseTemplate::new(status).set_body_json(&body)
+    })
+    .await;
+    test.codex
+        .start_or_steer_turn(disabled_permission_user_turn(
+            "continue on the smaller model",
+            test.cwd.path().to_path_buf(),
+            selected.to_string(),
+        ))
+        .await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    assert_eq!(denied.single_request().body_json()["model"], previous);
+    Ok(())
+}
+
 #[test_case::test_case(json!({"input_tokens": 120_000, "output_tokens": 30_000, "total_tokens": 150_000}); "reported_usage")]
 #[test_case::test_case(Value::Null; "missing_usage")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3496,6 +3556,37 @@ async fn pre_sampling_compact_advised_errors_fall_back_then_retry_on_selected_mo
     assert_eq!(actual_models, expected_models);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manual_local_compaction_retries_only_when_the_error_allows_it() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let overload = wiremock::ResponseTemplate::new(503)
+        .set_body_json(json!({ "error": { "code": "server_is_overloaded" } }));
+    for (failure, expected_requests) in [
+        (invalid_request_response("invalid compact input"), 1),
+        (overload.clone(), 1),
+        (overload.insert_header("Retry-After", "0"), 2),
+    ] {
+        let server = start_mock_server().await;
+        let requests = responses::mount_response_handler(&server, move |_| failure.clone()).await;
+        let mut provider = local_compaction_provider(&server);
+        provider.request_max_retries = Some(0);
+        provider.stream_max_retries = Some(1);
+        let test = test_codex()
+            .with_config(move |config| config.model_provider = provider)
+            .build_with_auto_env(&server)
+            .await?;
+
+        test.codex.submit(Op::Compact).await?;
+        wait_for_event(&test.codex, |event| {
+            matches!(event, EventMsg::TurnComplete(_))
+        })
+        .await;
+        assert_eq!(requests.requests().len(), expected_requests);
+    }
+    Ok(())
+}
+
 /// Manual compaction keeps the configured retry limit even when the server supplies advice.
 #[test_case::test_case(0; "no_retries")]
 #[test_case::test_case(2; "two_retries")]
@@ -4373,22 +4464,25 @@ async fn manual_compact_retries_after_context_window_error() {
         ev_assistant_message("m1", FIRST_REPLY),
         ev_completed("r1"),
     ]);
-    let compact_failed = sse_failed(
-        "resp-fail",
-        "context_length_exceeded",
-        CONTEXT_LIMIT_MESSAGE,
-    );
+    let compact_failed = wiremock::ResponseTemplate::new(/*s*/ 400).set_body_json(json!({
+        "error": {
+            "type": "invalid_request_error",
+            "code": "context_length_exceeded",
+            "message": CONTEXT_LIMIT_MESSAGE,
+            "param": "input",
+        }
+    }));
     let compact_succeeds = sse(vec![
         ev_assistant_message("m2", SUMMARY_TEXT),
         ev_completed("r2"),
     ]);
 
-    let request_log = mount_sse_sequence(
+    let request_log = mount_response_sequence(
         &server,
         vec![
-            user_turn.clone(),
-            compact_failed.clone(),
-            compact_succeeds.clone(),
+            sse_response(user_turn),
+            compact_failed,
+            sse_response(compact_succeeds),
         ],
     )
     .await;
